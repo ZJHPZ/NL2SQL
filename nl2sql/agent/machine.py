@@ -45,6 +45,13 @@ from ..contracts.pipeline import QueryOutcome
 from ..contracts.session import SessionState, Turn
 from ..contracts.tool import Capability, ToolContext, ToolResult
 from ..plugins import ToolRegistry
+from .context import compress_prompt_history, compress_session_context
+from .resilience import (
+    RetryPolicy,
+    is_retryable_model_error,
+    is_retryable_tool_error,
+    retry_call,
+)
 
 __all__ = [
     "AgentCore", "RunConfig", "RunContext", "Decision", "parse_decision",
@@ -71,6 +78,26 @@ class RunConfig:
     # 900 会在长推理时把 JSON 截断。给足余量比省这点 token 划算得多。
     max_tokens: int = 1400
     require_approval_for_writes: bool = True
+
+    # ---- 容错（借 langchain 的 retry/压缩思路，默认值保守）----
+    # 模型调用：只对**瞬态**故障（超时/连接/限流/5xx）重试；认证、参数、
+    # 内容安全这类重试无意义的错误直接失败。
+    llm_max_retries: int = 2
+    llm_retry_initial_delay: float = 0.5
+    llm_retry_max_delay: float = 8.0
+    # 模型输出被截断/不是合法 JSON 时，**带纠正提示**重问几次。
+    # 这是决策层的修复，不是网络重试：格式问题往往一次纠正就好。
+    llm_repair_attempts: int = 1
+    # 工具调用：只对**只读**工具的**瞬态**异常重试（写工具可能不幂等）。
+    # SQL 写错、字段不存在不重试——那是确定性失败，错误回灌给模型改。
+    tool_max_retries: int = 1
+    tool_retry_initial_delay: float = 0.2
+    # 决策 Prompt 里历史文本的总预算（字符）。超了先压旧观察，再逐条丢弃。
+    max_prompt_chars: int = 14000
+    # 最近几条工具观察保留全文；更早的压成一句"做过什么"
+    history_keep_observations: int = 3
+    # 跨轮会话上下文（`session.render_context`）渲染时的预算
+    session_context_chars: int = 4000
 
 
 class Route:
@@ -361,6 +388,37 @@ def _salvage_answer(text: str) -> str:
     return ""
 
 
+_FORMAT_FAIL_ANSWER = "模型返回的决策格式无法解析，请重试或换个问法。"
+
+
+def _repair_hint(resp: Any, decision: Decision) -> str | None:
+    """判断这次模型输出是否需要"带纠正提示重问"，返回提示文本。
+
+    两类**决策层**失败，都不是网络问题，重试（原样再问一遍）没用，
+    必须把"错在哪、要怎么改"写进下一轮的 user 消息：
+
+    1. `finish_reason == "length"`：输出被 `max_tokens` 截断。真模型在
+       长推理后会撞上这个上限，截断的 JSON 解析出来往往是残缺的 final。
+    2. 空回复，或看起来是 JSON 但解析失败（`parse_decision` 的兜底文案）。
+
+    纯文本回答**不修**：`parse_decision` 刻意把它当 final 容忍下来
+    （用户至少能看到模型说了什么），强行纠正可能把一次能用的回答弄没了。
+    """
+    text = (resp.text or "").strip()
+    if getattr(resp, "finish_reason", "") == "length":
+        return ("你的上一条回复因为长度上限被截断了（finish_reason=length）。"
+                "请只输出一个简短的 JSON 决策对象，不要写大段推理或表格。")
+    if not text or decision.final_answer == _FORMAT_FAIL_ANSWER:
+        snippet = text[:300].replace("\n", " ")
+        return ("你的上一条回复不是合法的 JSON 决策。请只输出一个 JSON 对象，"
+                "形如 {\"kind\":\"tool\",\"tool\":\"...\",\"args\":{...}} 或 "
+                "{\"kind\":\"final\",\"answer\":\"...\"} 或 "
+                "{\"kind\":\"clarify\",\"question\":\"...\",\"options\":[...]}，"
+                "不要包含任何额外文字。上一条回复开头："
+                f"{snippet!r}")
+    return None
+
+
 def parse_decision(text: str) -> Decision:
     """解析模型输出。宽容处理常见的格式偏差。
 
@@ -403,7 +461,7 @@ def parse_decision(text: str) -> Decision:
         if body.lstrip().startswith(("{", "[")):
             return Decision(
                 kind="final",
-                final_answer="模型返回的决策格式无法解析，请重试或换个问法。",
+                final_answer=_FORMAT_FAIL_ANSWER,
                 raw=raw,
             )
         return Decision(kind="final", final_answer=raw, raw=raw)
@@ -559,7 +617,14 @@ class AgentCore:
         # 先把**历史**渲染出来，再加入本轮问题。
         # 顺序很重要：回合制澄清靠它把上一轮接上——
         # 若只把本轮问题给模型，用户回答"本月"时模型根本不知道在回答什么。
-        prior = session.render_context(limit=16)
+        #
+        # 渲染时做**预算压缩**：会话里持久化的工具输出是完整的（界面要能
+        # 追溯"为什么给这个答案"），但喂给模型的只需要最近几条，更早的
+        # 按预算截断。持久化与 Prompt 是两种用途，不能共用一个尺寸。
+        prior = compress_session_context(
+            session.render_context(limit=16),
+            max_chars=self._config.session_context_chars,
+        )
         if prior:
             history.append("=== 之前的对话 ===")
             history.append(prior)
@@ -607,7 +672,10 @@ class AgentCore:
             return Route.EXHAUSTED
 
         s = time.perf_counter()
-        decision = self._ask_model(state["history"])
+        decision = self._ask_model(
+            state["history"], rctx=rctx, step=step,
+            trace=state["trace"], notes=state["notes"],
+        )
         elapsed = int((time.perf_counter() - s) * 1000)
         state["trace"][f"decide_{step}_ms"] = elapsed
         state["decision"] = decision.to_dict()
@@ -861,7 +929,9 @@ class AgentCore:
         return outcome
 
     # ------------------------------------------------------------ 模型
-    def _ask_model(self, history: list[str]) -> Decision:
+    def _ask_model(self, history: list[str], *, rctx: "RunContext | None" = None,
+                   step: int = 0, trace: dict[str, Any] | None = None,
+                   notes: list[str] | None = None) -> Decision:
         # registry.all() 返回的是**工具对象**，不是 spec——要取 .spec 再转 schema
         tools_schema = [t.spec.to_json_schema() for t in self._registry.all()]
         if not tools_schema:
@@ -876,23 +946,83 @@ class AgentCore:
             "\n\n可用工具（JSON Schema）：\n"
             + json.dumps(tools_schema, ensure_ascii=False, indent=1)
         )
-        user = "\n".join(history[-40:])
+        # 历史按预算压缩（旧观察压成一句、超预算再丢最老的条目）。
+        # 只压**喂给模型**的文本，不改 state["history"] 本身——
+        # 后者是这一轮的推理轨迹，最终还要用于 notes/追溯。
+        compressed = compress_prompt_history(
+            history,
+            max_chars=self._config.max_prompt_chars,
+            keep_observations=self._config.history_keep_observations,
+        )
+        user = "\n".join(compressed)
 
-        try:
-            resp = self._provider.chat(
-                [ChatMessage(role="system", content=system),
-                 ChatMessage(role="user", content=user)],
-                temperature=self._config.temperature,
-                max_tokens=self._config.max_tokens,
-                json_mode=True,
-            )
-        except Exception as e:  # noqa: BLE001 - 模型故障不该让循环崩掉
-            return Decision(
-                kind="final",
-                final_answer=f"模型调用失败：{e}",
-                raw=str(e),
-            )
-        return parse_decision(resp.text)
+        def _note(msg: str) -> None:
+            if notes is not None:
+                notes.append(msg)
+
+        messages = [ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user)]
+
+        # 为什么不用 openai SDK 自带的 retries：
+        #   * 它是黑盒——重试了没有、为什么，trace/界面里看不见；
+        #   * 它只处理网络/限流，不管"输出被截断""JSON 坏掉"这类
+        #     **决策层**失败，而那才是真模型最常见的失败方式。
+        # 所以模型调用统一走本项目自己的策略，SDK 的 retries 保持在 2 作为
+        # 最底层兜底（两层不会互相放大：内层先重试，外层看到的只是最终错误）。
+        policy = RetryPolicy(
+            max_retries=self._config.llm_max_retries,
+            initial_delay=self._config.llm_retry_initial_delay,
+            max_delay=self._config.llm_retry_max_delay,
+        )
+
+        def _on_retry(exc: BaseException, attempt: int, delay: float) -> None:
+            if trace is not None:
+                trace["llm_retries"] = int(trace.get("llm_retries") or 0) + 1
+            _note(f"模型调用失败（{type(exc).__name__}: {exc}），"
+                  f"第 {attempt} 次重试")
+            self.emit("model_retry", rctx=rctx, step=step, attempt=attempt,
+                      error=f"{type(exc).__name__}: {exc}"[:200],
+                      delay_ms=int(delay * 1000))
+
+        repairs = 0
+        while True:
+            try:
+                resp, _retries = retry_call(
+                    lambda: self._provider.chat(
+                        messages,
+                        temperature=self._config.temperature,
+                        max_tokens=self._config.max_tokens,
+                        json_mode=True,
+                    ),
+                    policy=policy,
+                    classify=is_retryable_model_error,
+                    on_retry=_on_retry,
+                )
+            except Exception as e:  # noqa: BLE001 - 模型故障不该让循环崩掉
+                _note(f"模型调用失败：{e}")
+                return Decision(
+                    kind="final",
+                    final_answer=f"模型调用失败：{e}",
+                    raw=str(e),
+                )
+
+            decision = parse_decision(resp.text)
+            hint = _repair_hint(resp, decision)
+            if hint is None or repairs >= self._config.llm_repair_attempts:
+                return decision
+            repairs += 1
+            if trace is not None:
+                trace["llm_repairs"] = int(trace.get("llm_repairs") or 0) + 1
+            _note("模型输出无法直接使用（"
+                  f"{'被截断' if 'length' == getattr(resp, 'finish_reason', '') else '格式不合'}），"
+                  "已带纠正提示重问")
+            self.emit("model_repair", rctx=rctx, step=step,
+                      reason=str(getattr(resp, "finish_reason", "") or "format"))
+            messages = messages + [
+                ChatMessage(role="assistant", content=(resp.text or "（空回复）")),
+                ChatMessage(role="user", content=hint),
+            ]
+
 
     # ------------------------------------------------------------ 工具调用
     def invoke(self, name: str, args: dict[str, Any],
@@ -901,11 +1031,28 @@ class AgentCore:
 
         **绝不向上抛**：agent 循环需要看到失败并据此决策，
         异常会打断循环、丢失上下文。
+
+        容错只在**只读工具**上做（写工具可能不幂等，重试一次就多写一次），
+        且只对瞬态异常（锁等待/连接断开）。SQL 写错这类确定性失败不重试：
+        错误会原样回灌给模型，让它改 SQL——那比"偷偷重试同一个坏 SQL"有用。
         """
         tool = self._registry.get(name)
         started = time.perf_counter()
+        retries = 0
         try:
-            result = tool.run(args, ctx)
+            if tool.spec.kind == "read" and self._config.tool_max_retries > 0:
+                policy = RetryPolicy(
+                    max_retries=self._config.tool_max_retries,
+                    initial_delay=self._config.tool_retry_initial_delay,
+                    max_delay=max(1.0, self._config.tool_retry_initial_delay * 4),
+                )
+                result, retries = retry_call(
+                    lambda: tool.run(args, ctx),
+                    policy=policy,
+                    classify=is_retryable_tool_error,
+                )
+            else:
+                result = tool.run(args, ctx)
         except PermissionError as e:
             result = ToolResult(
                 ok=False, error=f"权限不足: {e}",
@@ -917,8 +1064,12 @@ class AgentCore:
                 hint="工具内部异常；可尝试换一种调用方式或换用其它工具",
             )
         result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-        ctx.note("tool", {"name": name, "ok": result.ok,
-                          "elapsed_ms": result.elapsed_ms})
+        note: dict[str, Any] = {"name": name, "ok": result.ok,
+                                "elapsed_ms": result.elapsed_ms}
+        if retries:
+            # 重试过就要留痕：否则用户看到"这次查询慢"，不知道慢在重试上
+            note["retries"] = retries
+        ctx.note("tool", note)
         self._report_tool_call(ctx, name, result)
         return result
 

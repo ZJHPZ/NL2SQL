@@ -275,6 +275,20 @@ python tests/test_s3c_expressiveness.py
 > 观测是让试用能被记录、被归因的基础设施，不是试用本身。
 > 详见 **`docs/15-观测与试用记录.md`**。
 
+> **agent 容错与上下文预算**（借 langchain 官方实现思路落地，不搬框架）：
+> ①**模型调用重试**——只重试瞬态故障（超时/连接重置/429/5xx），401/400/安全类一次失败，
+> 默认 2 次、0.5s 起 ×2 退避、8s 封顶、±25% 抖动；每次重试写 `trace["llm_retries"]`
+> + SSE `model_retry` 事件。SDK 自带 retries 只作底层兜底，不让两层互相放大。
+> ②**决策修复**——输出被长度截断/空回复/坏 JSON 时，把"错在哪、怎么改"写进
+> 下一轮消息重问一次（纯文本回答刻意不修，它本来就是可接受的 final）。
+> ③**工具调用重试**——**只对只读工具、只对瞬态异常**（`database is locked`/断连），
+> 写工具可能不幂等不重试，SQL 确定性失败原样回灌给模型改。
+> ④**上下文预算**——Prompt 历史（14000 字符，保留最近 3 条观察）与会话渲染
+> （4000 字符、单行 600）按预算裁旧内容，**不引入摘要模型**（多一次调用、
+> 引入非确定性；结构化历史按预算裁更便宜可复现）。压缩只发生在渲染层，
+> 持久化的完整历史不受影响。离线验收 `tests/test_agent_resilience.py` 74 项。
+> 详见 **`docs/03` §14**。
+
 实施中发现的问题记录在六处文档：
 - S2 两个静默失效坑（SQLite 只读 URI、FTS5 中文分词）→ `docs/02` 第 16 节
 - S3 编译器五个坑 → `docs/02` 第 17 节
@@ -321,6 +335,13 @@ python tests/test_s3c_expressiveness.py
   （「完全无法判断才追问」和「犹豫时选择作答」放在一起，模型自己临场裁量）。
   修法是把边界写死：指标数值缺时间范围必须追问；比较/排名默认口径作答并披露；
   预测类不编造。真模型 T7/T8 连续两次复跑通过 → `docs/05` ⑥ 后续收紧
+- (b) 三个"不做"比"做"更重要的取舍：①**不照搬 langchain 的 middleware 管线**——
+  本项目是显式状态机 + 两执行器，护栏位置一目了然，为三个策略加一层钩子适配
+  收益为负，只把策略搬进 `resilience.py`/`context.py`；②**写工具不重试**——
+  重试写工具等于多写一次，幂等性没保证就不该自动重试；③**不引入摘要模型**——
+  多一次模型调用 + 引入非确定性，比按字符预算裁旧观察贵。另：SDK 自带 retries
+  是黑盒（重试了没、为什么都看不见），观测只能靠自己在 `_ask_model`/`invoke` 里
+  分类重试 → `docs/03` §14
 
 ---
 
@@ -347,6 +368,8 @@ talk-to-sql/
 │   ├── skills/          **技能加载（SKILL.md → 只读目录 + 加载报告）**
 │   ├── agent/           **智能体：单步状态机 + 两个执行器**
 │   │   ├── machine.py   单步状态机（决策解析、7 道护栏、结果挑选、收尾）
+│   │   ├── resilience.py 重试策略（异常分类 + 指数退避/抖动）
+│   │   ├── context.py   Prompt 历史与会话渲染的预算压缩
 │   │   ├── runtime.py   执行器 A：while 循环（等价性基准，零第三方依赖）
 │   │   ├── graph.py     执行器 B：GraphSpec → LangGraph StateGraph（通用编译器）
 │   │   ├── factory.py   按 `NL2SQL_RUNTIME` 选择，降级留痕
@@ -472,6 +495,9 @@ python scripts/heldout_eval.py                                          # ④ �
 # 5h) M5 观测验收（离线：九态契约 / 聚合口径 / 两个执行器的工具上报 / 管理端点）
 python tests/test_m5_observability.py
 # 起界面后：管理页 → 使用统计；或 GET /api/admin/stats?days=7
+
+# 5i) agent 容错验收（离线：模型/工具重试、输出修复、上下文预算；74 项断言）
+python tests/test_agent_resilience.py
 
 # 5c) 智能体真实模型验收（需 Key）
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx'
