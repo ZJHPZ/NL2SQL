@@ -296,3 +296,51 @@ export interface ToolsetInfo {
   planner_mode: string
   version: string
 }
+
+// ---------------------------------------------------------------- 使用统计（M5）
+/** 单个工具/技能的调用聚合 */
+export interface ToolCallStat {
+  calls: number
+  failures: number
+  failure_rate: number
+  avg_ms: number
+  p95_ms: number
+}
+
+/** 最近一次失败的归因（管理页用来看"现在坏在哪"） */
+export interface RecentFailure {
+  created_at: string
+  source_id: string
+  status: string
+  question: string
+  error_code: string | null
+  elapsed_ms: number
+  planner: string
+  runtime: string
+}
+
+/** `GET /api/admin/stats` 的返回。口径见 docs/15：
+ *  need_clarification 单列不算失败；by_status 九态零填充。 */
+export interface AdminStats {
+  total: number
+  /** 九种 QueryStatus 零填充的计数 */
+  by_status: Record<string, number>
+  success: number
+  clarify: number
+  failure: number
+  success_rate: number
+  failure_rate: number
+  cached: number
+  cached_rate: number
+  latency_ms: { p50: number; p95: number; avg: number }
+  tools: {
+    total: number
+    failures: number
+    failure_rate: number
+    by_tool: Record<string, ToolCallStat>
+  }
+  recent_failures: RecentFailure[]
+  since: string | null
+  planner_mode: string
+  runtime: string
+}

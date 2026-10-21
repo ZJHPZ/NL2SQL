@@ -429,6 +429,7 @@ class NL2SQL:
             provider=provider, registry=registry, config=run_cfg,
             capabilities=granted,
             schema_brief=self._schema_brief(),
+            on_tool_call=self._record_tool_call,
         )
         # 降级要留痕：用户以为在跑图执行器、实际没有，是最难排查的那种沉默
         self.runtime_note = runtime_note
@@ -623,10 +624,67 @@ class NL2SQL:
                 on_event=on_event,
             )
 
-        return self._agent.run(
+        outcome = self._agent.run(
             question, source_id=source_cfg.source_id, now=resolved_now,
             use_cache=use_cache,
         )
+        self._record_query(outcome)
+        return outcome
+
+    # ------------------------------------------------------------ 观测写入
+    def _record_query(self, outcome: QueryOutcome, *,
+                      session_id: str = "", steps: int = 0) -> None:
+        """把一次问答写入观测存储（append-only）。
+
+        **写入失败不影响问答**：统计是旁路。这条原则与历史写入一致——
+        一个用来"看趋势"的表，不能因为磁盘满或锁表把查询本身搞挂。
+        """
+        store = getattr(self.storage, "stats", None) if self.storage else None
+        if store is None:
+            return
+        try:
+            from datetime import datetime
+
+            from .contracts.storage import QueryLogRecord
+
+            store.add_query(QueryLogRecord(
+                created_at=datetime.now().replace(microsecond=0).isoformat(),
+                source_id=outcome.source_id or "",
+                status=str(outcome.status),
+                question=outcome.question,
+                session_id=session_id,
+                planner=self.planner_mode,
+                runtime=self.runtime_name,
+                error_code=outcome.error_code,
+                cached=bool(outcome.cached),
+                elapsed_ms=int(outcome.elapsed_ms or 0),
+                row_count=int(outcome.result.row_count) if outcome.result else 0,
+                steps=int(steps),
+            ))
+        except Exception:  # noqa: BLE001 - 观测是旁路
+            pass
+
+    def _record_tool_call(self, payload: dict[str, Any]) -> None:
+        """工具调用观测回调（由 AgentCore 在每次 invoke 后调用）。"""
+        store = getattr(self.storage, "stats", None) if self.storage else None
+        if store is None:
+            return
+        try:
+            from datetime import datetime
+
+            from .contracts.storage import ToolCallRecord
+
+            store.add_tool_call(ToolCallRecord(
+                created_at=datetime.now().replace(microsecond=0).isoformat(),
+                tool=str(payload.get("tool") or ""),
+                ok=bool(payload.get("ok")),
+                elapsed_ms=int(payload.get("elapsed_ms") or 0),
+                session_id=str(payload.get("session_id") or ""),
+                source_id=str(payload.get("source_id") or ""),
+                error=payload.get("error") or None,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------ agent 运行
     def _run_agent(self, question: str, *, source_id: str, now: str | None,
@@ -678,6 +736,10 @@ class NL2SQL:
                                     resources=resources,
                                     on_event=on_event)
         outcome.plan_fingerprint = outcome.plan_fingerprint or None
+        # 观测：模型跑了几步（trace 里 decide_* 的条数）也要落库——
+        # 步数是成本的可观测代理，压到 1 步和压到 8 步不是一回事。
+        steps = sum(1 for key in outcome.trace if key.startswith("decide_"))
+        self._record_query(outcome, session_id=sid, steps=steps)
         if store is not None:
             try:
                 store.save(session)
@@ -792,6 +854,36 @@ class NL2SQL:
             self.config.resolve_source().source_id if self.config.sources else None
         )
         return self.storage.meta.list_history(source_id=sid, limit=limit)  # type: ignore[union-attr]
+
+    # ------------------------------------------------------------ 观测（统计）
+    def stats(self, *, since: str | None = None) -> dict[str, Any]:
+        """使用统计：问答次数、状态分布、延迟分位、工具调用失败率。
+
+        `since` 是 ISO 时间字符串（含则只统计该时刻之后）。口径见
+        `docs/15`：**need_clarification 单列，不算失败**——追问是正常交互，
+        把它算进失败率会让"主动澄清"看起来像系统出错。
+        """
+        self.connect()
+        store = getattr(self.storage, "stats", None) if self.storage else None
+        if store is None:
+            # 统计不可用不该让管理页整页失败：返回空结构，界面显示"暂无数据"
+            payload: dict[str, Any] = {
+                "total": 0, "by_status": {}, "success": 0, "clarify": 0,
+                "failure": 0, "success_rate": 0.0, "failure_rate": 0.0,
+                "cached": 0, "cached_rate": 0.0,
+                "latency_ms": {"p50": 0, "p95": 0, "avg": 0},
+                "tools": {"total": 0, "failures": 0,
+                          "failure_rate": 0.0, "by_tool": {}},
+                "recent_failures": [],
+            }
+        else:
+            payload = store.query_stats(since=since)
+            payload["recent_failures"] = store.recent_failures(
+                limit=10, since=since)
+        payload["since"] = since
+        payload["planner_mode"] = self.planner_mode
+        payload["runtime"] = self.runtime_name
+        return payload
 
     # ------------------------------------------------------------ 知识库
     def _require_knowledge(self) -> Any:

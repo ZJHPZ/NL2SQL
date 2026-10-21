@@ -12,7 +12,7 @@ import sqlite3
 
 from .text import index_text
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------- 元数据与历史
 DDL_META = """
@@ -159,6 +159,48 @@ CREATE INDEX IF NOT EXISTS idx_session_updated
     ON agent_session (updated_at DESC);
 """
 
+# ---------------------------------------------------------------- 观测（M5）
+# append-only：只插入、不更新。统计要的是"发生过什么"，事后改写记录
+# 会让"上周失败率"变成一个能变的数字，那就不叫统计了。
+#
+# 为什么不用现成的 history 表：那张表是"回放某一次问答"的契约
+# （内容含 sql/plan_fingerprint，供复查），而观测要的是可以用索引扫的
+# 轻量列（planner/runtime/status/steps）。混在一起会让两个用途互相绑架。
+DDL_STATS = """
+CREATE TABLE IF NOT EXISTS query_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    source_id   TEXT NOT NULL,
+    session_id  TEXT DEFAULT '',
+    question    TEXT DEFAULT '',
+    planner     TEXT DEFAULT '',
+    runtime     TEXT DEFAULT '',
+    status      TEXT NOT NULL,
+    error_code  TEXT,
+    cached      INTEGER DEFAULT 0,
+    elapsed_ms  INTEGER DEFAULT 0,
+    row_count   INTEGER DEFAULT 0,
+    steps       INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_query_log_time
+    ON query_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_query_log_status
+    ON query_log (status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS tool_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    session_id TEXT DEFAULT '',
+    source_id  TEXT DEFAULT '',
+    tool       TEXT NOT NULL,
+    ok         INTEGER NOT NULL,
+    elapsed_ms INTEGER DEFAULT 0,
+    error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tool_log_time
+    ON tool_log (created_at DESC);
+"""
+
 
 def migrate(conn: sqlite3.Connection) -> int:
     """建表 / 升级。返回当前 schema 版本。"""
@@ -216,6 +258,13 @@ def migrate(conn: sqlite3.Connection) -> int:
         cur.execute("PRAGMA user_version = 4")
         conn.commit()
         version = 4
+
+    # v4 → v5：观测表（问答/工具调用 append-only 记录，M5）
+    if version < 5:
+        cur.executescript(DDL_STATS)
+        cur.execute("PRAGMA user_version = 5")
+        conn.commit()
+        version = 5
 
     return version
 

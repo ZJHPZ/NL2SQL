@@ -254,6 +254,23 @@ def list_tools(engine: Any = Depends(get_engine)) -> dict[str, Any]:
     }
 
 
+@router.get("/stats")
+def admin_stats(days: int = 30,
+                engine: Any = Depends(get_engine)) -> dict[str, Any]:
+    """使用统计（M5）：问答次数 / 状态分布 / 失败率 / 延迟分位 / 工具调用。
+
+    `days` 是回看窗口（默认 30 天）。口径：**need_clarification 单列，
+    不算失败**；`by_status` 九态零填充，所以界面不用猜"没出现的状态是 0
+    还是没统计"。
+    """
+    from datetime import datetime, timedelta
+
+    engine.connect()
+    since = (datetime.now() - timedelta(days=max(1, days))).replace(
+        microsecond=0).isoformat()
+    return engine.stats(since=since)
+
+
 @router.get("/config")
 def read_config(engine: Any = Depends(get_engine)) -> dict[str, Any]:
     """配置文件原文。界面允许直接编辑——个人工具的用户就是开发者。"""

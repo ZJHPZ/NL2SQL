@@ -33,6 +33,31 @@ function toneOf(status: string): string {
   return 'bad'
 }
 
+/** 失败归因：九种状态每种都要回答"为什么"和"接下来怎么办"。
+ *
+ * 只显示「失败」两个字，用户拿它没法行动——归因文案本身就是功能。
+ * 文案与 `nl2sql/contracts/pipeline.py` 的 QueryStatus 一一对应；
+ * 新增状态时这里必须同步（前端不查后端枚举，靠这条注释约束）。
+ */
+const STATUS_HINT: Record<string, string> = {
+  ok: '',
+  empty: '查询条件把数据全筛掉了（或该时间范围内确实没有记录）。'
+    + '先看下面的生效过滤条件，放宽其中一个再试。',
+  truncated: '结果超过行数上限被截断，表格不是全量。'
+    + '加时间范围、缩小维度，或加排序只取前 N 条。',
+  unresolved: '这句话没能映射到语义模型的指标/维度。'
+    + '换用已定义的指标名，或先问「这个库里有什么数据」。',
+  invalid_sql: 'SQL 没通过校验（常见原因：列名不存在）。'
+    + '在候选字段里点一个正确的列名，或换个说法。',
+  blocked: 'SQL 被安全守门拦截（非只读语句或多条语句）。'
+    + '这里是查询工具，只允许单条只读 SELECT。',
+  timeout: '执行超时。加个时间范围，或用语义层指标代替全表扫描，再试一次。',
+  error: '数据源或执行环节报错。看下面的具体错误信息；'
+    + '若是连接问题，去「数据源」检查配置。',
+  need_clarification: '系统上下文不足，主动向你追问——这是正常交互，不是出错。'
+    + '回答后会自动继续。',
+}
+
 const PLANNER_LABEL: Record<string, string> = {
   rule: '规则规划器（无模型）',
   llm: '模型规划器',
@@ -103,12 +128,24 @@ export function StatusBar({ data, onPickOption }: {
         </div>
       )}
 
+      {/* 归因：状态说明与"下一步怎么办"。后端 message 是本次的具体原因，
+          这里是该类失败的通解——两者一起才够用户行动。 */}
+      {data.status !== 'ok' && !clarifying && STATUS_HINT[data.status] && (
+        <div className="alert alert-info status-hint">
+          <strong>
+            {STATUS_LABEL[data.status] ?? data.status}：为什么、怎么办
+          </strong>
+          <div>{STATUS_HINT[data.status]}</div>
+        </div>
+      )}
+
       {/* 智能体追问：把问题和可选项做成可点的按钮。
           用户不必打字——点一下就是回答，下一轮自动带上会话。 */}
       {clarifying && (
         <div className="alert alert-warn clarify">
           <strong>智能体需要你补充信息</strong>
           <div className="clarify-q">{data.message}</div>
+          <div className="meta">{STATUS_HINT.need_clarification}</div>
           {data.candidates.length > 0 && (
             <div className="chips">
               {data.candidates.map((c, i) => (

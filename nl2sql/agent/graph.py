@@ -273,12 +273,14 @@ class LangGraphRuntime:
                  system_prompt: str = "",
                  schema_brief: str = "",
                  on_event: Callable[[dict[str, Any]], None] | None = None,
+                 on_tool_call: Callable[[dict[str, Any]], None] | None = None,
                  checkpointer: Any = None,
                  recursion_limit: int | None = None) -> None:
         self._core = AgentCore(
             provider=provider, registry=registry, config=config,
             capabilities=capabilities, system_prompt=system_prompt,
             schema_brief=schema_brief, on_event=on_event,
+            on_tool_call=on_tool_call,
         )
         self._checkpointer = checkpointer
         self._app: Any = None

@@ -6,6 +6,7 @@
  * 抛异常会让每个调用点都要写 try/catch，且容易漏掉导致白屏。
  */
 import type {
+  AdminStats,
   HistoryItem,
   InfoResponse,
   KnowledgeHit,
@@ -217,4 +218,8 @@ export const api = {
     request<{
       ok: boolean; tools: string[]; plugin_errors: string[]; note: string
     }>('/api/admin/reload', { method: 'POST', body: '{}' }),
+
+  /** 使用统计（M5）：回看最近 days 天 */
+  adminStats: (days = 30) =>
+    request<AdminStats>(`/api/admin/stats?days=${days}`),
 }

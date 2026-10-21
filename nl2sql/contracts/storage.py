@@ -49,6 +49,43 @@ class HistoryRecord:
 
 
 @dataclass
+class QueryLogRecord:
+    """一次问答的**观测记录**（append-only，供统计聚合）。
+
+    与 `HistoryRecord` 的分工：那个供"回放/复查某一次问答"，这个供
+    "最近用得怎么样、错得多不多"。刻意分成两张表——统计查询会扫全表，
+    不该和回放记录抢同一份索引；而且观测数据的字段需求（planner/runtime）
+    会随实验变化，不该污染回放契约。
+    """
+
+    created_at: str
+    source_id: str
+    status: str
+    question: str = ""
+    session_id: str = ""
+    planner: str = ""
+    runtime: str = ""
+    error_code: str | None = None
+    cached: bool = False
+    elapsed_ms: int = 0
+    row_count: int = 0
+    steps: int = 0
+
+
+@dataclass
+class ToolCallRecord:
+    """一次工具调用的观测记录。来源是运行时里的显式回调，不是从日志反解。"""
+
+    created_at: str
+    tool: str
+    ok: bool
+    elapsed_ms: int = 0
+    session_id: str = ""
+    source_id: str = ""
+    error: str | None = None
+
+
+@dataclass
 class CachedResult:
     """结果缓存条目。键 = (source_id, plan_fingerprint)。"""
 
@@ -133,6 +170,24 @@ class Embedder(Protocol):
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
+class StatsStore(Protocol):
+    """观测数据：append-only 记录 + 聚合查询。
+
+    为什么是 append-only：统计要的是"发生过什么"，而不是"当前状态"。
+    更新/删除记录会让"上周的失败率"在事后被改写，那统计就失去意义。
+    """
+
+    def add_query(self, rec: QueryLogRecord) -> None: ...
+    def add_tool_call(self, rec: ToolCallRecord) -> None: ...
+    def query_stats(self, *, since: str | None = None) -> dict[str, Any]:
+        """聚合：总数、状态分布、成功率、延迟分位、工具调用统计。"""
+        ...
+    def recent_failures(self, *, limit: int = 10,
+                        since: str | None = None) -> list[dict[str, Any]]:
+        """最近的非成功条目（界面"失败归因"面板用）。"""
+        ...
+
+
 @dataclass
 class StorageBundle:
     """一次装配好的存储集合，由核心注入使用（避免模块级全局）。"""
@@ -144,3 +199,5 @@ class StorageBundle:
     embedder: Embedder | None = None
     # agent 会话（回合制澄清需要）。可选：不使用 agent 模式时可缺省。
     sessions: Any = None
+    # 观测（M5）。可选：旧实现/测试桩没有它时，统计降级为空而不是报错。
+    stats: StatsStore | None = None

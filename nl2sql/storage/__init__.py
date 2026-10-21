@@ -24,6 +24,7 @@ from .sqlite_cache import SqliteResultCache
 from .sqlite_knowledge import SqliteKnowledgeStore
 from .sqlite_meta import SqliteMetaStore
 from .sqlite_session import SqliteSessionStore
+from .sqlite_stats import KNOWN_STATUSES, SqliteStatsStore
 
 __all__ = [
     "build_storage",
@@ -32,6 +33,8 @@ __all__ = [
     "SqliteKnowledgeStore",
     "SqliteResultCache",
     "SqliteSessionStore",
+    "SqliteStatsStore",
+    "KNOWN_STATUSES",
     "MemoryVectorStore",
     "HashEmbedder",
     "normalize_value",
@@ -69,6 +72,7 @@ def build_storage(
     knowledge = SqliteKnowledgeStore(db_path)
     cache = SqliteResultCache(db_path)
     sessions = SqliteSessionStore(db_path)
+    stats = SqliteStatsStore(db_path)
 
     vector = None
     embedder = None
@@ -84,7 +88,7 @@ def build_storage(
 
     return StorageBundle(
         meta=meta, knowledge=knowledge, cache=cache,
-        vector=vector, embedder=embedder, sessions=sessions,
+        vector=vector, embedder=embedder, sessions=sessions, stats=stats,
     )
 
 
@@ -107,7 +111,7 @@ def _default_vector_store(name: str, embedder: object) -> object:
 def close_storage(bundle: StorageBundle) -> None:
     """关闭全部存储。单个失败不阻断其余关闭。"""
     for component in (bundle.meta, bundle.knowledge, bundle.cache,
-                      bundle.sessions):
+                      bundle.sessions, bundle.stats):
         closer = getattr(component, "close", None)
         if callable(closer):
             try:

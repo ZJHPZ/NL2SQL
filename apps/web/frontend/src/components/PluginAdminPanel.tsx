@@ -12,10 +12,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import type {
-  CapabilityInfo, PluginInfo, SkillInfo, ToolInfo, ToolsetInfo,
+  AdminStats, CapabilityInfo, PluginInfo, SkillInfo, ToolInfo, ToolsetInfo,
 } from '../types'
 
-type SubTab = 'tools' | 'capabilities' | 'settings'
+type SubTab = 'tools' | 'capabilities' | 'stats' | 'settings'
+
+const pct = (x: number) => `${(x * 100).toFixed(1)}%`
 
 function RiskBadge({ risk }: { risk: string }) {
   const label = risk === 'high' ? '高危' : risk === 'medium' ? '中' : '低'
@@ -31,6 +33,8 @@ export function PluginAdminPanel() {
   const [err, setErr] = useState<string | null>(null)
   const [cfgText, setCfgText] = useState('')
   const [cfgPath, setCfgPath] = useState('')
+  const [stats, setStats] = useState<AdminStats | null>(null)
+  const [statsDays, setStatsDays] = useState(30)
   const [loop, setLoop] = useState({ max_steps: 8, max_repeat: 2, temperature: 0 })
 
   const load = useCallback(async () => {
@@ -53,6 +57,20 @@ export function PluginAdminPanel() {
   }, [])
 
   useEffect(() => { void load() }, [load])
+
+  // 统计按需加载：管理页打开时不必为一个没人看的标签多打一次接口。
+  useEffect(() => {
+    if (tab !== 'stats' || stats) return
+    void api.adminStats(statsDays).then((r) => {
+      if (!r.ok) { setErr(`${r.error.error}: ${r.error.detail}`); return }
+      setStats(r.data)
+    })
+  }, [tab, stats, statsDays])
+
+  const reloadStats = (days = statsDays) => {
+    setStats(null)
+    setStatsDays(days)
+  }
 
   const act = async (fn: () => Promise<void>) => {
     setBusy(true); setErr(null); setMsg(null)
@@ -123,6 +141,10 @@ export function PluginAdminPanel() {
         <button className={tab === 'capabilities' ? 'tab active' : 'tab'}
                 onClick={() => setTab('capabilities')}>
           能力
+        </button>
+        <button className={tab === 'stats' ? 'tab active' : 'tab'}
+                onClick={() => setTab('stats')}>
+          使用统计
         </button>
         <button className={tab === 'settings' ? 'tab active' : 'tab'}
                 onClick={() => setTab('settings')}>
@@ -384,6 +406,144 @@ export function PluginAdminPanel() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------ 统计 */}
+      {tab === 'stats' && (
+        <div className="admin-section">
+          <div className="admin-title">
+            使用统计
+            <span className="spacer" />
+            <span className="meta">
+              口径：追问单列，不算失败；状态零填充
+            </span>
+          </div>
+          <div className="admin-hint">
+            数据来自观测日志（只追加，不改写）。看趋势用这里，看单条失败
+            去查询页的归因区。
+          </div>
+
+          <div className="form-row">
+            <label>
+              回看
+              <select value={statsDays} disabled={busy}
+                      onChange={(e) => reloadStats(Number(e.target.value))}>
+                <option value={1}>最近 1 天</option>
+                <option value={7}>最近 7 天</option>
+                <option value={30}>最近 30 天</option>
+                <option value={90}>最近 90 天</option>
+              </select>
+              <span className="meta">默认 30 天</span>
+            </label>
+          </div>
+
+          {!stats && <div className="meta">加载中…</div>}
+
+          {stats && stats.total === 0 && (
+            <div className="meta">
+              这段时间没有查询记录。先去问一个问题，数据就有了。
+            </div>
+          )}
+
+          {stats && stats.total > 0 && (
+            <>
+              <div className="safety-box">
+                <div className="safety-title">总览</div>
+                <div className="safety-row">
+                  <span>问答总数</span><b>{stats.total}</b>
+                </div>
+                <div className="safety-row">
+                  <span>成功率</span><b className="ok-text">{pct(stats.success_rate)}</b>
+                </div>
+                <div className="safety-row">
+                  <span>失败率</span>
+                  <b className={stats.failure_rate > 0.1 ? 'warn-text' : ''}>
+                    {pct(stats.failure_rate)}
+                  </b>
+                </div>
+                <div className="safety-row">
+                  <span>追问（不算失败）</span><b>{stats.clarify}</b>
+                </div>
+                <div className="safety-row">
+                  <span>缓存命中</span><b>{pct(stats.cached_rate)}</b>
+                </div>
+                <div className="safety-row">
+                  <span>延迟 P50 / P95</span>
+                  <b>{stats.latency_ms.p50} / {stats.latency_ms.p95} ms</b>
+                </div>
+                <div className="safety-note">
+                  平均延迟 {stats.latency_ms.avg} ms ·
+                  规划器 {stats.planner_mode} · 执行器 {stats.runtime || '—'}
+                </div>
+              </div>
+
+              <div className="admin-title" style={{ marginTop: 12 }}>
+                状态分布
+              </div>
+              <div className="chips">
+                {Object.entries(stats.by_status).map(([k, v]) => (
+                  <span className="chip mono" key={k} title={k}>
+                    {k} {v}
+                  </span>
+                ))}
+              </div>
+
+              {stats.tools.total > 0 && (
+                <>
+                  <div className="admin-title" style={{ marginTop: 12 }}>
+                    工具调用 <span className="meta">{stats.tools.total} 次，失败率 {pct(stats.tools.failure_rate)}</span>
+                  </div>
+                  <ul className="tool-list">
+                    {Object.entries(stats.tools.by_tool).map(([name, t]) => (
+                      <li key={name}>
+                        <div className="tool-head">
+                          <span className="mono">{name}</span>
+                          <span className="meta">{t.calls} 次</span>
+                          {t.failures > 0 && (
+                            <span className="badge badge-warn">
+                              失败率 {pct(t.failure_rate)}
+                            </span>
+                          )}
+                          <span className="spacer" />
+                          <span className="meta">
+                            平均 {t.avg_ms} ms · P95 {t.p95_ms} ms
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+
+              <div className="admin-title" style={{ marginTop: 12 }}>
+                最近失败 <span className="meta">{stats.recent_failures.length} 条</span>
+              </div>
+              {stats.recent_failures.length === 0 ? (
+                <div className="meta">这段时间没有失败。挺好的。</div>
+              ) : (
+                <ul className="tool-list">
+                  {stats.recent_failures.map((f) => (
+                    <li key={`${f.created_at}-${f.question}`}>
+                      <div className="tool-head">
+                        <span className="badge badge-bad">{f.status}</span>
+                        <span className="mono">{f.created_at}</span>
+                        <span className="spacer" />
+                        <span className="meta">{f.elapsed_ms} ms</span>
+                      </div>
+                      <div className="tool-desc">{f.question}</div>
+                      <div className="tool-meta">
+                        <span className="meta">
+                          {f.planner} · {f.runtime || '—'}
+                          {f.error_code ? ` · ${f.error_code}` : ''}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
         </div>
       )}
 

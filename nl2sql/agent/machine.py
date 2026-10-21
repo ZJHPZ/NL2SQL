@@ -449,13 +449,19 @@ class AgentCore:
                  capabilities: tuple[Capability, ...] = (),
                  system_prompt: str = "",
                  schema_brief: str = "",
-                 on_event: Callable[[dict[str, Any]], None] | None = None
+                 on_event: Callable[[dict[str, Any]], None] | None = None,
+                 on_tool_call: Callable[[dict[str, Any]], None] | None = None
                  ) -> None:
         self._provider = provider
         self._registry = registry
         self._config = config or RunConfig()
         self._capabilities = capabilities
         self._system_prompt = system_prompt
+        # 观测回调：每次工具调用后上报一条记录（M5 的"工具调用统计"）。
+        # **与事件回调分开**：事件是给界面的进度流（可以没有订阅者），
+        # 观测是给统计的持久化（不依赖是否有人看）。合并会让"没开 SSE
+        # 就没有统计"这种坑出现。
+        self._on_tool_call = on_tool_call
         # 库表事实：**直接喂给模型，而不是让它去猜或额外调一次工具**。
         #
         # 起因是内部试用：问"这个库有什么数据"，模型从语义摘要推断出
@@ -900,7 +906,25 @@ class AgentCore:
         result.elapsed_ms = int((time.perf_counter() - started) * 1000)
         ctx.note("tool", {"name": name, "ok": result.ok,
                           "elapsed_ms": result.elapsed_ms})
+        self._report_tool_call(ctx, name, result)
         return result
+
+    def _report_tool_call(self, ctx: ToolContext, name: str,
+                          result: ToolResult) -> None:
+        """上报一条工具调用观测记录。**观测失败绝不影响查询**。"""
+        if self._on_tool_call is None:
+            return
+        try:
+            self._on_tool_call({
+                "tool": name,
+                "ok": bool(result.ok),
+                "elapsed_ms": int(result.elapsed_ms),
+                "error": (result.error or "")[:300] or None,
+                "session_id": ctx.session_id,
+                "source_id": ctx.source_id,
+            })
+        except Exception:  # noqa: BLE001 - 统计是旁路，不能拖垮主流程
+            pass
 
 
 def _now_iso() -> str:
