@@ -203,8 +203,17 @@ class NL2SQLConfig:
 
     def add_mysql(self, *, host: str, user: str, database: str,
                   source_id: str = DEFAULT_SOURCE_ID, port: int = 3306,
-                  credential_ref: str | None = None, label: str = "",
+                  credential_ref: str | None = "env:NL2SQL_MYSQL_PASSWORD",
+                  label: str = "",
                   semantic_path: str | None = None) -> "NL2SQLConfig":
+        """配置一个 MySQL 数据源。
+
+        `credential_ref` 说明**口令去哪取**，而不是口令本身：
+            `"env:NAME"`  从环境变量 NAME 读（默认 `env:NL2SQL_MYSQL_PASSWORD`）
+            `"env"`       等价于 `env:NL2SQL_MYSQL_PASSWORD`
+            其他前缀      暂不支持，会在装配时明确报错（不静默失败）
+        密码永远不进配置文件，也不进源码树。
+        """
         self.sources[source_id] = SourceConfig(
             source_id=source_id, adapter="mysql", label=label or source_id,
             options=SourceOptions(host=host, port=port, user=user, database=database),

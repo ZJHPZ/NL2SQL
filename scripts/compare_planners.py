@@ -17,8 +17,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "golden_set"))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN_DB = os.path.join(ROOT, "golden_set", "ecommerce.db")
@@ -29,40 +29,13 @@ from nl2sql import NL2SQL, NL2SQLConfig  # noqa: E402
 from nl2sql.llm import OpenAICompatProvider  # noqa: E402
 from nl2sql.semantics.golden_model import build_model  # noqa: E402
 
+# 判分口径**只有一份**，就是 golden_set/evaluate.py 的那份。
+# 这里曾经自带一个"最小实现"，它把 NULL 从签名里整个丢掉了 ——
+# 于是"多返回一列 NULL"被判成正确，准确率被高估 5 题（25/30 → 20/30）。
+# 判分器不能各写一份：这一处漂移直接改了论文里最重要的那个数字。
+from evaluate import rows_equal  # noqa: E402
 
-# 结果比对从 tests 里导入会触发那个模块的 stdout 包装（把管道关掉），
-# 所以这里自带一份最小实现。真正的判分逻辑在 tests/test_s4b_llm.py。
-def _canon_cell(v):
-    if v is None:
-        return ("null",)
-    s = str(v).strip()
-    try:
-        f = float(s)
-    except (TypeError, ValueError):
-        return ("str", s)
-    return ("num", float(int(f)) if f == int(f) and abs(f) < 1e15 else round(f, 4))
-
-
-def rows_match(expected, got, tol: float = 1e-6) -> bool:
-    def sig(rows):
-        out = []
-        for r in rows:
-            cells = [_canon_cell(v) for v in r]
-            out.append((
-                tuple(sorted(c[1] for c in cells if c[0] == "num")),
-                tuple(sorted(c[1] for c in cells if c[0] == "str")),
-            ))
-        return sorted(out)
-
-    a, b = sig(expected), sig(got)
-    if len(a) != len(b):
-        return False
-    for (na, sa), (nb, sb) in zip(a, b):
-        if sa != sb or len(na) != len(nb):
-            return False
-        if any(abs(x - y) > tol for x, y in zip(na, nb)):
-            return False
-    return True
+rows_match = rows_equal
 
 
 def run(planner: str, provider, cases, work: str,
@@ -163,4 +136,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                      errors="replace")
     raise SystemExit(main())

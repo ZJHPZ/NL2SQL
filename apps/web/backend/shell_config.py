@@ -5,7 +5,16 @@
 测试与排障都会变难。
 
 环境变量（全部可选，缺省即降级）：
+    NL2SQL_ADAPTER       数据源类型：sqlite（默认）/ mysql
     NL2SQL_DB            SQLite 数据库路径（默认 golden_set/ecommerce.db）
+    NL2SQL_MYSQL_HOST    MySQL 主机（默认 127.0.0.1）
+    NL2SQL_MYSQL_PORT    MySQL 端口（默认 3306）
+    NL2SQL_MYSQL_USER    MySQL 账号
+    NL2SQL_MYSQL_DATABASE
+                         MySQL 库名
+    NL2SQL_MYSQL_PASSWORD
+                         MySQL 口令。**只从环境读，不进配置文件、不进页面**，
+                         与 `NL2SQL_LLM_API_KEY` 同一条规矩。
     NL2SQL_STATE_DIR     状态目录（默认 data）
     NL2SQL_SOURCE_ID     数据源标识（默认 default）
     NL2SQL_CONFIG        运行配置文件路径（默认 config/nl2sql.toml）
@@ -40,6 +49,14 @@ class ShellConfig:
     """壳层解析后的运行参数，供 `/api/info` 展示与排障。"""
 
     db_path: str = DEFAULT_DB
+    # 数据源类型：sqlite（默认）/ mysql。换引擎**只改这一个变量**，
+    # 上层（规划器 / 编译器 / 守门 / 缓存）一行都不用动 ——
+    # 这正是 M1 要证明的事。
+    adapter: str = "sqlite"
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = ""
+    mysql_database: str = ""
     state_dir: str = "data"
     source_id: str = "default"
     planner: str = "auto"
@@ -63,6 +80,11 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
     key = e.get("NL2SQL_LLM_API_KEY", "").strip()
     return ShellConfig(
         db_path=e.get("NL2SQL_DB", DEFAULT_DB),
+        adapter=(e.get("NL2SQL_ADAPTER", "sqlite") or "sqlite").strip().lower(),
+        mysql_host=e.get("NL2SQL_MYSQL_HOST", "127.0.0.1"),
+        mysql_port=int(e.get("NL2SQL_MYSQL_PORT", "3306") or 3306),
+        mysql_user=e.get("NL2SQL_MYSQL_USER", ""),
+        mysql_database=e.get("NL2SQL_MYSQL_DATABASE", ""),
         state_dir=e.get("NL2SQL_STATE_DIR", "data"),
         source_id=e.get("NL2SQL_SOURCE_ID", "default"),
         planner=e.get("NL2SQL_PLANNER", "auto"),
@@ -92,7 +114,11 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
         llm_model=e.get("NL2SQL_LLM_MODEL", ""),
         llm_key_present=bool(key),
         raw_env={
+            "NL2SQL_ADAPTER": e.get("NL2SQL_ADAPTER", ""),
             "NL2SQL_DB": e.get("NL2SQL_DB", ""),
+            "NL2SQL_MYSQL_HOST": e.get("NL2SQL_MYSQL_HOST", ""),
+            "NL2SQL_MYSQL_USER": e.get("NL2SQL_MYSQL_USER", ""),
+            "NL2SQL_MYSQL_DATABASE": e.get("NL2SQL_MYSQL_DATABASE", ""),
             "NL2SQL_PLANNER": e.get("NL2SQL_PLANNER", ""),
             "NL2SQL_CONFIG": e.get("NL2SQL_CONFIG", ""),
             "NL2SQL_PLUGINS": e.get("NL2SQL_PLUGINS", ""),
@@ -115,9 +141,19 @@ def build_shell_config(shell: ShellConfig) -> tuple[NL2SQLConfig, Any]:
     from nl2sql.config_file import apply_to_agent_config, load_runtime_settings
 
     cfg = NL2SQLConfig(state_dir=shell.state_dir)
-    cfg.add_sqlite(shell.db_path, source_id=shell.source_id,
-                   label=shell.source_id,
-                   semantic_path=shell.metrics_path or None)
+    if shell.adapter == "mysql":
+        # 口令不在 ShellConfig 里，读时现取；核心层的 credential_ref 会说
+        # 明"去哪个环境变量取"，所以这里不需要把口令传第二遍。
+        cfg.add_mysql(host=shell.mysql_host, port=shell.mysql_port,
+                      user=shell.mysql_user, database=shell.mysql_database,
+                      source_id=shell.source_id,
+                      credential_ref="env:NL2SQL_MYSQL_PASSWORD",
+                      label=shell.source_id,
+                      semantic_path=shell.metrics_path or None)
+    else:
+        cfg.add_sqlite(shell.db_path, source_id=shell.source_id,
+                       label=shell.source_id,
+                       semantic_path=shell.metrics_path or None)
     cfg.agent.planner = shell.planner
     cfg.agent.config_path = shell.config_path
     if shell.plugins:

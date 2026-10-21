@@ -23,7 +23,17 @@ import sqlite3
 import sys
 import time
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+def _setup_stdout() -> None:
+    """只在**直接运行**时接管 stdout。
+
+    这个包装曾经写在模块顶层，导致任何 `import evaluate` 都会把调用方的
+    stdout 换成自己的（输出被吞掉）。判分函数 `rows_equal` 是可复用的资产
+    —— MySQL 等价性验收要用的就是**同一个**判分口径，不能各写一份，
+    所以这里必须能安全 import。
+    """
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                      errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(HERE, "ecommerce.db")
@@ -53,13 +63,24 @@ def canon_cell(v):
 
 
 def canon_rows(rows, float_tol=1e-6):
-    """行序无关 + 数值容差的多重集比较。"""
+    """行序无关 + 列序无关 + 数值容差的多重集比较。
+
+    判分规则（**三条必须一起说，只说一条就会自相矛盾**）：
+        1. 行序无关 —— SQL 没有 ORDER BY 时行序本来不定
+        2. 列序无关 —— 不比列名，就没有列身份，剩下的只有位置；
+           而位置由 SQL 书写顺序决定，与"算得对不对"无关
+        3. NULL 参与比较 —— 多返回一列 NULL 不算对
+
+    这里曾经只排字符串列、不排数值列：同一行里两个字符串列互换能过，
+    两个数值列互换不能过。这条不对称让 5 道题（A4/B1/D2/D6/E4）在
+    两份判分器上得到相反的结论，而准确率正是论文里最重要的那个数字。
+    """
     out = []
     for r in rows:
         cells = [canon_cell(v) for v in r]
-        # 数值单元格分组，便于容差比较
-        nums = tuple(round(c[1], 4) for c in cells if c[0] == "num")
-        strs = tuple(sorted(c[1] for c in cells if c[0] != "num"))
+        # 数值单元格排序：与字符串列一致，做到"行内无序"
+        nums = tuple(sorted(round(c[1], 4) for c in cells if c[0] == "num"))
+        strs = tuple(sorted(c[1] for c in cells if c[0] == "str"))
         nulls = sum(1 for c in cells if c[0] == "null")
         out.append((nums, strs, nulls))
     return sorted(out)
@@ -154,5 +175,6 @@ def evaluate(pred_path=None):
 
 
 if __name__ == "__main__":
+    _setup_stdout()
     path = sys.argv[1] if len(sys.argv) > 1 else None
     evaluate(path)

@@ -40,6 +40,9 @@ ALLOWED_THIRD_PARTY = {
     # 模型客户端：仅用于 OpenAI 兼容端点（DeepSeek/通义/Kimi/GLM/OpenAI），
     # 且在 llm/providers.py 里延迟导入——没装也能用规则规划器
     "openai",
+    # MySQL 驱动：只在 sources/mysql.py 里导入，且是可选依赖
+    # （`pip install .[mysql]`）。没装时连不上库，但核心层仍能 import 起来。
+    "pymysql",
 }
 
 STDLIB = set(sys.stdlib_module_names)

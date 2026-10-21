@@ -25,7 +25,8 @@
 | **T1–T7** | **升级为智能体：工具循环 + 插件体系** | ✅ |
 | **P0** | **插件与工具管理（看得见 / 管得了 / 配得了）** | ✅ |
 | **P0b** | **技能机制（`SKILL.md`）：发现 / 报告 / `skill.load` / 界面第四块** | ✅ 见 `docs/08` |
-| S7–S9 | SDK / MySQL / 多方言 | ⬜ |
+| **M1** | **第二个引擎：MySQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11` |
+| S7–S9 | SDK / 多方言 / 开题后的其余引擎 | ⬜ |
 
 ### 插件与工具管理
 
@@ -208,6 +209,13 @@ python tests/test_s3c_expressiveness.py
 > 换厂商只改两行）。自检：`python scripts/check_llm.py`。
 > **API Key 不要写进代码、文件或对话**；明文传输过的 Key 应视为已泄露并轮换。
 
+> **换数据库引擎只改一个环境变量**：`NL2SQL_ADAPTER=mysql` +
+> `NL2SQL_MYSQL_HOST/PORT/USER/DATABASE/PASSWORD`（口令只从环境读）。
+> 上层（规划器 / 编译器 / 守门 / 缓存）一行都不用动——这正是 M1 要证明的事。
+> 数据准备两步：`python scripts/mysql_load_golden.py`（灌黄金集，幂等）与
+> `python scripts/mysql_create_ro_user.py`（建只读账号，口令随机生成并只写 `.env`）。
+> 详见 **`docs/11-MySQL适配器与跨引擎等价.md`**。
+
 实施中发现的问题记录在六处文档：
 - S2 两个静默失效坑（SQLite 只读 URI、FTS5 中文分词）→ `docs/02` 第 16 节
 - S3 编译器五个坑 → `docs/02` 第 17 节
@@ -219,6 +227,9 @@ python tests/test_s3c_expressiveness.py
   time_range 叠加导致某列恒为 0、组内前N 被同时当成整表 LIMIT、
   "新客"/"新客户"被当成两个类别）+ 一个潜伏的 `PlanDimension.name` 崩溃
   → `docs/07` 第 2/4/5 节
+- M1 两处判分器 bug（比错列、丢 NULL）与跨引擎验收带出的其余坑
+  （只读账号把 1305 掩盖成 1142、`%W` 与 `%v` 语义不同）
+  → `docs/11` 第 4/6 节
 
 ---
 
@@ -231,8 +242,8 @@ talk-to-sql/
 │   │   ├── tool.py      工具契约 + 能力清单（智能体的手脚与权限）
 │   │   └── session.py   会话契约（回合制澄清需要）
 │   ├── storage/         元数据 / 知识 / 缓存 / 会话（默认全 SQLite）
-│   ├── sources/         数据源适配器（P0: SQLite, MySQL）
-│   ├── dialect/         sqlglot 方言编译与 SQL 校验
+│   ├── sources/         数据源适配器（SQLite / MySQL，共用同一套能力声明）
+│   ├── dialect/         按方言能力声明做确定性编译（sqlglot 仅作可选体检）
 │   ├── guard/           执行前确定性安全校验
 │   ├── catalog/         元数据快照
 │   ├── semantics/       **dbt metrics.yml 加载器** → 语义模型 → 逻辑计划
@@ -243,7 +254,7 @@ talk-to-sql/
 │   ├── cache/           结果缓存（逻辑计划指纹）
 │   ├── plugins/         **插件加载 + 对外稳定接口 ToolRegistry**
 │   ├── skills/          **技能加载（SKILL.md → 只读目录 + 加载报告）**
-│   ├── agent/           LangGraph 编排 + **AgentRuntime 工具循环**
+│   ├── agent/           **AgentRuntime 工具循环**（图契约已定型；LangGraph 执行器在 M2）
 │   │   ├── runtime.py   循环、观测回灌、防打转、运行时硬约束
 │   │   └── builtin.py   9 个内置工具
 │   ├── config.py        配置（演示 pydantic-free 的显式配置）
@@ -329,6 +340,10 @@ python tests/test_p0b_skills.py
 python scripts/plugin_dev_trial.py --no-llm    # 离线 1–5 节
 python scripts/plugin_dev_trial.py             # 加第 6 节：模型是否真的选中新工具（需 Key）
 
+# 5d) 跨引擎等价验收（需本机 MySQL + .env 里的凭据；A–E 节只读，不写库）
+#     F 节验证"改一个环境变量就换引擎"，D 节跑两边黄金集并逐题比对
+python tests/test_m1_mysql.py
+
 # 5c) 智能体真实模型验收（需 Key）
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx'
 python tests/test_t7_agent_live.py
@@ -387,7 +402,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 
 ## 文档索引
 
-分两类：**01–09 是分模块的施工记录**（每一份都由那一阶段真实的测量结果写成，
+分两类：**01–09 与 11 是分模块的施工记录**（每一份都由那一阶段真实的测量结果写成，
 包含踩到的坑与负结果），**10 是整体判断**（现在有什么、还缺什么、按什么顺序补）。
 
 | 文档 | 内容 |
@@ -402,6 +417,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | `docs/07-语义层表达能力.md` | 缺口清单、四个真坑、四种规划器实测 |
 | `docs/08-技能设计草案.md` | 声明式档（`SKILL.md`）、P0 实施记录、P1–P3 待拍板 |
 | `docs/09-参考实现-superpowers.md` | 可迁移的五条、不该抄的四条 |
+| `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、29/30 等价、**判分器漂移**、只读账号与 `credential_ref` |
 | `golden_set/README.md` | 评测集用法、口径约定、多方言扩展 |
 | `方案骨架.md` | 项目定位、分层骨架、决策记录、待定项 |
 | `题库分析.md` | 3,378 题题库评估：为何不能当黄金集、改用途建议 |
@@ -417,7 +433,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 
 | 月 | 主题 | 硬验收 |
 |---|---|---|
-| M1 | ~~锁住底座~~（已完成：git + 单一版本号 + pre-commit）+ MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致** |
+| M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致**（实测 29/30，差的 C3 是计划内方言缺口） |
 | M2 | LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 outcome **逐题一致**，首字节 <1s |
 | M3 | 语义层两个原语（时间粒度、标量比较） | 黄金集 ≥28/30 |
 | M4 | 实验（覆盖率扫描、口径漂移、消融） | 四张表 + 一张曲线 |
