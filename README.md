@@ -25,7 +25,7 @@
 | **T1–T7** | **升级为智能体：工具循环 + 插件体系** | ✅ |
 | **P0** | **插件与工具管理（看得见 / 管得了 / 配得了）** | ✅ |
 | **P0b** | **技能机制（`SKILL.md`）：发现 / 报告 / `skill.load` / 界面第四块** | ✅ 见 `docs/08` |
-| **M1** | **第二个引擎：MySQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11` |
+| **M1** | **第二、三个引擎：MySQL + PostgreSQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11`（PostgreSQL 为 2026-10 补做，§10） |
 | **M2** | **LangGraph 执行器 + SSE 流式（30 题录制—重放 30/30 一致）** | ✅ 见 `docs/12` |
 | **M3** | **语义层两个原语：时间粒度 + 标量比较（黄金集 29/30）** | ✅ 见 `docs/13` |
 | **M4** | **实验：覆盖率 / 口径漂移 / 消融 / 留出集（rule 13/20；llm 12/20）** | ✅ 见 `docs/14` |
@@ -228,7 +228,11 @@ python tests/test_s3c_expressiveness.py
 > 上层（规划器 / 编译器 / 守门 / 缓存）一行都不用动——这正是 M1 要证明的事。
 > 数据准备两步：`python scripts/mysql_load_golden.py`（灌黄金集，幂等）与
 > `python scripts/mysql_create_ro_user.py`（建只读账号，口令随机生成并只写 `.env`）。
-> 详见 **`docs/11-MySQL适配器与跨引擎等价.md`**。
+> 第三引擎同理：`NL2SQL_ADAPTER=postgres` +
+> `NL2SQL_PG_HOST/PORT/USER/DATABASE/PASSWORD`，验收 `python tests/test_pg_engine.py`
+> （自带 `embedded-postgres` 二进制时不需要装服务；golden 数据由
+> `scripts/pg_load_golden.py` 从 SQLite 原样搬）。
+> 详见 **`docs/11-MySQL适配器与跨引擎等价.md`**（MySQL §1–§9，PostgreSQL §10）。
 
 > **执行器可切换**：`NL2SQL_RUNTIME=auto / loop / langgraph`（默认 `auto`，
 > 装了 langgraph 即用图执行器）。两者**行为等价**（6 个场景逐字段一致，
@@ -303,6 +307,12 @@ python tests/test_s3c_expressiveness.py
 - M1 两处判分器 bug（比错列、丢 NULL）与跨引擎验收带出的其余坑
   （只读账号把 1305 掩盖成 1142、`%W` 与 `%v` 语义不同）
   → `docs/11` 第 4/6 节
+- M1 后补第三引擎 PostgreSQL 的坑：`pg_ctl start` 在 Windows 受限令牌下报
+  `could not create restricted token: error code 87`（直接跑 `postgres.exe` 绕开）；
+  本沙箱里后端进程间信号被拦，`statement_timeout` 与 `pg_cancel_backend` 都不生效
+  （`SHOW` 显示 200ms、`pg_sleep` 照跑），超时翻译改用 SQLSTATE 57014 验证；
+  周口径要对齐 SQLite `%Y-%W` 而非 ISO 周年、`TO_CHAR` 没有 `'Q'` 模式
+  → `docs/11` §10
 - M2 两个"代码看起来对、数字不对"的坑（LangGraph 只给**注解**为 `RunnableConfig`
   的参数注入 config；Starlette 的 TestClient 会把 SSE 响应整个缓冲完，
   首字节必须用真 uvicorn 量）+ 三个设计坑（`emit` 参数名与载荷撞车、
@@ -354,7 +364,7 @@ talk-to-sql/
 │   │   ├── tool.py      工具契约 + 能力清单（智能体的手脚与权限）
 │   │   └── session.py   会话契约（回合制澄清需要）
 │   ├── storage/         元数据 / 知识 / 缓存 / 会话 / 观测账本（默认全 SQLite）
-│   ├── sources/         数据源适配器（SQLite / MySQL，共用同一套能力声明）
+│   ├── sources/         数据源适配器（SQLite / MySQL / PostgreSQL，共用同一套能力声明）
 │   ├── dialect/         按方言能力声明做确定性编译（sqlglot 仅作可选体检）
 │   ├── guard/           执行前确定性安全校验
 │   ├── catalog/         元数据快照
@@ -393,6 +403,7 @@ talk-to-sql/
 │
 ├── golden_set/          黄金评测集（30 题 + 判分器）
 │   ├── metrics.yml      黄金语义模型的 **dbt 语法版本**（等价性验收物）
+│   ├── schema_postgres.sql  PostgreSQL 版 DDL（第三引擎验收用，数值/生成列按 PG 类型）
 │   └── heldout.json     **留出集 20 题**（M3 写完、M4 一次性跑 13/20、之后不再调参）
 ├── scripts/             开发工具
 │   ├── check_layers.py  层依赖检查（架构约束可执行化）
@@ -402,6 +413,7 @@ talk-to-sql/
 │   ├── drift_table.py   实验② 口径漂移 13 例
 │   ├── ablation.py      实验③ 消融（缓存/知识库/守门/窗口指标）
 │   ├── heldout_eval.py  实验④ 留出集一次性评估（开发期只跑一次）
+│   ├── pg_load_golden.py PostgreSQL 灌数（从 SQLite 原样搬，保证数据完全相同）
 │   └── scaffold.py      模块骨架生成
 ├── docs/                设计与边界文档
 │   ├── assets/          论文图（coverage_curve.png 等）
@@ -468,6 +480,12 @@ python scripts/plugin_dev_trial.py             # 加第 6 节：模型是否真�
 # 5d) 跨引擎等价验收（需本机 MySQL + .env 里的凭据；A–E 节只读，不写库）
 #     F 节验证"改一个环境变量就换引擎"，D 节跑两边黄金集并逐题比对
 python tests/test_m1_mysql.py
+
+# 5d2) 第三引擎 PostgreSQL 验收（不需要装服务/管理员权限）
+#     用 embedded-postgres 自带的 PostgreSQL 18 二进制：pip install embedded-postgres
+#     （或用 NL2SQL_PG_BIN 指向任意 PG 的 bin 目录）；测试自己 initdb/起停/灌数。
+#     没装二进制时打印安装说明并返回 0 —— 未跑 ≠ 通过。
+python tests/test_pg_engine.py
 
 # 5e) 执行器等价验收（离线部分无需 Key）
 #     6 个脚本化场景逐字段比对"自写循环"与"LangGraph 执行器"（含事件序列）；
@@ -572,7 +590,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | `docs/07-语义层表达能力.md` | 缺口清单、四个真坑、四种规划器实测 |
 | `docs/08-技能设计草案.md` | 声明式档（`SKILL.md`）、P0 实施记录、P1–P3 待拍板 |
 | `docs/09-参考实现-superpowers.md` | 可迁移的五条、不该抄的四条 |
-| `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、**判分器漂移**、只读账号与 `credential_ref`；C3 缺口由 M3 闭合（C 节 30/30） |
+| `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、**判分器漂移**、只读账号与 `credential_ref`；C3 缺口由 M3 闭合（C 节 30/30）；**§10 第三引擎 PostgreSQL**（核心零改动、30/30 跨引擎等价、embedded PG 起停与沙箱限制） |
 | `docs/12-LangGraph执行器与等价性.md` | 单步状态机、图谱、两执行器等价性、SSE 首字节、五个"数字不对"的坑 |
 | `docs/13-语义表达力.md` | 时间粒度与标量比较、`against` 的歧义建模、共享语义模型的顺序依赖 bug、29/30 与 D3 口径说明 |
 | `docs/14-实验.md` | 覆盖率扫描（8 档曲线 + "失败不可见"）、口径漂移 13 例、消融、留出集 13/20、四张表与复现命令 |
@@ -592,7 +610,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 
 | 月 | 主题 | 硬验收 |
 |---|---|---|
-| M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致**（M3 后 C 节已 30/30；D 节两端 29/30 同失败集） |
+| M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器（+ 2026-10 补 PostgreSQL 第三引擎） | 30 题 SQLite vs MySQL **逐题一致**（M3 后 C 节已 30/30；D 节两端 29/30 同失败集）；**SQLite vs PostgreSQL 30/30 逐题一致、端到端 29/30 同失败集** |
 | M2 | **已完成**：LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 6 场景逐字段一致；30 题**录制—重放 30/30 一致**（Prompt 0 偏差）；首字节 <1s |
 | M3 | **已完成**：语义层两个原语（时间粒度、标量比较） | 黄金集 **29/30 = 96.7%**（≥28/30）；D3 为黄金集口径不一致 |
 | M4 | **已完成**：实验（覆盖率扫描、口径漂移、消融、留出集） | 覆盖率曲线紧贴语义天花板（8 档差 0–1 题）；漂移 13/13 >5%；留出集 **13/20 = 65.0%**（如实记录，未据此调参）；**llm 档 23/20/17、留出集 12/20**——换规划器没有提高上限 |

@@ -43,6 +43,9 @@ ALLOWED_THIRD_PARTY = {
     # MySQL 驱动：只在 sources/mysql.py 里导入，且是可选依赖
     # （`pip install .[mysql]`）。没装时连不上库，但核心层仍能 import 起来。
     "pymysql",
+    # PostgreSQL 驱动：只在 sources/postgres.py 里导入，同样是可选依赖
+    # （`pip install .[postgres]`）。
+    "psycopg",
 }
 
 STDLIB = set(sys.stdlib_module_names)

@@ -60,6 +60,16 @@ class SourceConfig:
                 raise ConfigError(
                     f"[{self.source_id}] 未提供 credential_ref；密码不得明文写在配置里"
                 )
+        elif self.adapter == "postgres":
+            if not (self.options.host and self.options.user and self.options.database):
+                raise ConfigError(
+                    f"[{self.source_id}] postgres 适配器需要"
+                    " options.host / user / database"
+                )
+            if not self.credential_ref:
+                raise ConfigError(
+                    f"[{self.source_id}] 未提供 credential_ref；密码不得明文写在配置里"
+                )
 
 
 @dataclass
@@ -225,6 +235,30 @@ class NL2SQLConfig:
         """
         self.sources[source_id] = SourceConfig(
             source_id=source_id, adapter="mysql", label=label or source_id,
+            options=SourceOptions(host=host, port=port, user=user, database=database),
+            credential_ref=credential_ref, semantic_path=semantic_path,
+        )
+        self.default_source = self.default_source or source_id
+        return self
+
+    def add_postgres(self, *, host: str, user: str, database: str,
+                     source_id: str = DEFAULT_SOURCE_ID, port: int = 5432,
+                     credential_ref: str | None = "env:NL2SQL_PG_PASSWORD",
+                     label: str = "",
+                     semantic_path: str | None = None) -> "NL2SQLConfig":
+        """配置一个 PostgreSQL 数据源（第三引擎）。
+
+        `credential_ref` 说明**口令去哪取**，而不是口令本身：
+            `"env:NAME"`  从环境变量 NAME 读（默认 `env:NL2SQL_PG_PASSWORD`）
+            `"env"`       等价于 `env:NL2SQL_PG_PASSWORD`
+            其他前缀      暂不支持，会在装配时明确报错（不静默失败）
+        密码永远不进配置文件，也不进源码树。
+
+        和 MySQL 的一处差别：本地 trust 认证的库允许口令为空，
+        所以这里不强制"必须取到口令"（要不要口令由服务端决定）。
+        """
+        self.sources[source_id] = SourceConfig(
+            source_id=source_id, adapter="postgres", label=label or source_id,
             options=SourceOptions(host=host, port=port, user=user, database=database),
             credential_ref=credential_ref, semantic_path=semantic_path,
         )

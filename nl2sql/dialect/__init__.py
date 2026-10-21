@@ -74,6 +74,27 @@ _DIALECT_TIME_GRAINS: dict[str, dict[str, str]] = {
         "quarter": "CONCAT(YEAR({x}), '-Q', QUARTER({x}))",
         "year": "DATE_FORMAT({x}, '%Y')",
     },
+    # PostgreSQL 没有 strftime/DATE_FORMAT 这一族，用 TO_CHAR / EXTRACT。
+    # 口径必须与 SQLite 的 %Y-%W 完全一致（M1 三引擎等价验收靠这个）：
+    #   * week 不用 TO_CHAR 的 'IW'（ISO 周）：ISO 周年与 %W 的"当年第几个
+    #     周一"在跨年周上会差一位。改按 DOY/ISODOW 自己算：
+    #     (年内第几天 + 7 - 本周周几) / 7，整数除法，与 %W 公式同构。
+    #   * quarter 不用 TO_CHAR：PG 的 TO_CHAR 没有 'Q' 模式（没有该字段），
+    #     用 EXTRACT(QUARTER ...) 拼字符串。
+    "postgres": {
+        "day": "TO_CHAR({x}, 'YYYY-MM-DD')",
+        "week": (
+            "TO_CHAR({x}, 'YYYY') || '-' || LPAD(CAST(("
+            "CAST(EXTRACT(DOY FROM {x}) AS INT) + 7 "
+            "- CAST(EXTRACT(ISODOW FROM {x}) AS INT)) / 7 AS TEXT), 2, '0')"
+        ),
+        "month": "TO_CHAR({x}, 'YYYY-MM')",
+        "quarter": (
+            "TO_CHAR({x}, 'YYYY') || '-Q' || "
+            "CAST(EXTRACT(QUARTER FROM {x}) AS INT)::text"
+        ),
+        "year": "TO_CHAR({x}, 'YYYY')",
+    },
 }
 
 

@@ -5,7 +5,7 @@
 测试与排障都会变难。
 
 环境变量（全部可选，缺省即降级）：
-    NL2SQL_ADAPTER       数据源类型：sqlite（默认）/ mysql
+    NL2SQL_ADAPTER       数据源类型：sqlite（默认）/ mysql / postgres
     NL2SQL_DB            SQLite 数据库路径（默认 golden_set/ecommerce.db）
     NL2SQL_MYSQL_HOST    MySQL 主机（默认 127.0.0.1）
     NL2SQL_MYSQL_PORT    MySQL 端口（默认 3306）
@@ -15,6 +15,12 @@
     NL2SQL_MYSQL_PASSWORD
                          MySQL 口令。**只从环境读，不进配置文件、不进页面**，
                          与 `NL2SQL_LLM_API_KEY` 同一条规矩。
+    NL2SQL_PG_HOST       PostgreSQL 主机（默认 127.0.0.1）
+    NL2SQL_PG_PORT       PostgreSQL 端口（默认 5432）
+    NL2SQL_PG_USER       PostgreSQL 账号
+    NL2SQL_PG_DATABASE   PostgreSQL 库名
+    NL2SQL_PG_PASSWORD   PostgreSQL 口令。同样只从环境读；
+                         trust 认证的本地库可以不设。
     NL2SQL_STATE_DIR     状态目录（默认 data）
     NL2SQL_SOURCE_ID     数据源标识（默认 default）
     NL2SQL_CONFIG        运行配置文件路径（默认 config/nl2sql.toml）
@@ -53,7 +59,7 @@ class ShellConfig:
     """壳层解析后的运行参数，供 `/api/info` 展示与排障。"""
 
     db_path: str = DEFAULT_DB
-    # 数据源类型：sqlite（默认）/ mysql。换引擎**只改这一个变量**，
+    # 数据源类型：sqlite（默认）/ mysql / postgres。换引擎**只改这一个变量**，
     # 上层（规划器 / 编译器 / 守门 / 缓存）一行都不用动 ——
     # 这正是 M1 要证明的事。
     adapter: str = "sqlite"
@@ -61,6 +67,10 @@ class ShellConfig:
     mysql_port: int = 3306
     mysql_user: str = ""
     mysql_database: str = ""
+    pg_host: str = "127.0.0.1"
+    pg_port: int = 5432
+    pg_user: str = ""
+    pg_database: str = ""
     state_dir: str = "data"
     source_id: str = "default"
     planner: str = "auto"
@@ -91,6 +101,10 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
         mysql_port=int(e.get("NL2SQL_MYSQL_PORT", "3306") or 3306),
         mysql_user=e.get("NL2SQL_MYSQL_USER", ""),
         mysql_database=e.get("NL2SQL_MYSQL_DATABASE", ""),
+        pg_host=e.get("NL2SQL_PG_HOST", "127.0.0.1"),
+        pg_port=int(e.get("NL2SQL_PG_PORT", "5432") or 5432),
+        pg_user=e.get("NL2SQL_PG_USER", ""),
+        pg_database=e.get("NL2SQL_PG_DATABASE", ""),
         state_dir=e.get("NL2SQL_STATE_DIR", "data"),
         source_id=e.get("NL2SQL_SOURCE_ID", "default"),
         planner=e.get("NL2SQL_PLANNER", "auto"),
@@ -126,6 +140,9 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
             "NL2SQL_MYSQL_HOST": e.get("NL2SQL_MYSQL_HOST", ""),
             "NL2SQL_MYSQL_USER": e.get("NL2SQL_MYSQL_USER", ""),
             "NL2SQL_MYSQL_DATABASE": e.get("NL2SQL_MYSQL_DATABASE", ""),
+            "NL2SQL_PG_HOST": e.get("NL2SQL_PG_HOST", ""),
+            "NL2SQL_PG_USER": e.get("NL2SQL_PG_USER", ""),
+            "NL2SQL_PG_DATABASE": e.get("NL2SQL_PG_DATABASE", ""),
             "NL2SQL_PLANNER": e.get("NL2SQL_PLANNER", ""),
             "NL2SQL_RUNTIME": e.get("NL2SQL_RUNTIME", ""),
             "NL2SQL_CONFIG": e.get("NL2SQL_CONFIG", ""),
@@ -149,7 +166,16 @@ def build_shell_config(shell: ShellConfig) -> tuple[NL2SQLConfig, Any]:
     from nl2sql.config_file import apply_to_agent_config, load_runtime_settings
 
     cfg = NL2SQLConfig(state_dir=shell.state_dir)
-    if shell.adapter == "mysql":
+    if shell.adapter == "postgres":
+        # 口令来源规则同 MySQL：credential_ref 说明"去哪个环境变量取"。
+        # trust 认证的本地库取不到口令也能连（由服务端决定要不要口令）。
+        cfg.add_postgres(host=shell.pg_host, port=shell.pg_port,
+                         user=shell.pg_user, database=shell.pg_database,
+                         source_id=shell.source_id,
+                         credential_ref="env:NL2SQL_PG_PASSWORD",
+                         label=shell.source_id,
+                         semantic_path=shell.metrics_path or None)
+    elif shell.adapter == "mysql":
         # 口令不在 ShellConfig 里，读时现取；核心层的 credential_ref 会说
         # 明"去哪个环境变量取"，所以这里不需要把口令传第二遍。
         cfg.add_mysql(host=shell.mysql_host, port=shell.mysql_port,

@@ -5,6 +5,11 @@
 MySQL 是这条路的第一个真实用例：`nl2sql/sources/mysql.py` 一个文件
 加上下面 `_BUILTIN` 的一行，就把"只支持 SQLite"变成了"两个引擎"。
 这条声明以前没有证据支撑（只跑过 SQLite），现在有了。
+
+PostgreSQL 是第二个用例：`nl2sql/sources/postgres.py` 同样一个文件 +
+`_BUILTIN` 一行 + `config.add_postgres`，就成了第三个引擎。
+**核心层（语义/编译/守门/管线）没有改一行** —— 这不是目标本身，
+而是"capability 驱动降级"这条设计原则的直接结果。
 """
 from __future__ import annotations
 
@@ -81,10 +86,39 @@ def _build_mysql(source_cfg: SourceConfig, *,
     )
 
 
+def _build_postgres(source_cfg: SourceConfig, *,
+                    credentials: dict[str, str]) -> SourceAdapter:
+    """从配置 + 凭据装配 PostgreSQL 适配器。
+
+    口令来源见 `resolve_secret`。POSTGRES 的 `credential_ref` 默认指向
+    `NL2SQL_PG_PASSWORD`；本地 trust 认证时允许口令为空（不像 MySQL
+    那样直接报错），因为要不要口令是服务端决定的，适配器不替它把关。
+    """
+    from .postgres import PostgresAdapter
+
+    opts = source_cfg.options
+    ref = source_cfg.credential_ref or "env:NL2SQL_PG_PASSWORD"
+    password = resolve_secret(ref, credentials) or ""
+    if not (opts.host and opts.user and opts.database):
+        raise ConfigError(
+            f"[{source_cfg.source_id}] postgres 需要 options.host / user / database"
+        )
+    return PostgresAdapter(
+        host=opts.host,
+        port=int(opts.port or 5432),
+        user=opts.user,
+        database=opts.database,
+        password=password,
+        schema=str(opts.params.get("schema") or "public"),
+        read_only=bool(opts.params.get("read_only", True)),
+    )
+
+
 #: 内置适配器工厂。第三方数据源不必登记在这里——
 #: 传 `registry` 覆盖即可（registry 优先）。
 _BUILTIN: dict[str, Callable[..., SourceAdapter]] = {
     "mysql": _build_mysql,
+    "postgres": _build_postgres,
 }
 
 

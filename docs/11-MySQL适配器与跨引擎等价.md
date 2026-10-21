@@ -317,13 +317,15 @@ credentials["password"]     显式传入（测试、嵌入式调用）
 `apps/web/backend/shell_config.py` 增加了：
 
 ```
-NL2SQL_ADAPTER=sqlite|mysql
+NL2SQL_ADAPTER=sqlite|mysql|postgres
 NL2SQL_MYSQL_HOST / PORT / USER / DATABASE
 NL2SQL_MYSQL_PASSWORD   ← 只从环境读，不进配置文件、不进页面
+NL2SQL_PG_HOST / PORT / USER / DATABASE
+NL2SQL_PG_PASSWORD      ← 同上；trust 认证时可为空（见 §10）
 ```
 
-`build_shell_config` 按 `adapter` 走 `add_mysql(...)` 或 `add_sqlite(...)`，
-两边都带上 `credential_ref="env:NL2SQL_MYSQL_PASSWORD"`。
+`build_shell_config` 按 `adapter` 走 `add_postgres(...)` / `add_mysql(...)` 或
+`add_sqlite(...)`，三条分支都带上 `credential_ref="env:..."`。
 
 F 节验证：改这一个变量 → 装配成 MySQL 数据源 → 无 Key 时退化为规则规划器 →
 经壳层问一句能出结果。**上层（规划器 / 编译器 / 守门 / 缓存）一行都没改。**
@@ -339,7 +341,7 @@ F 节验证：改这一个变量 → 装配成 MySQL 数据源 → 无 Key 时�
 |---|---|---|
 | C3（ISO 周分桶） | 需要 grain 原语，用 `DATE_FORMAT` 打补丁会制造静默错误 | M3 |
 | 字符串聚合（`GROUP_CONCAT` 的 `SEPARATOR`） | 黄金集没有这个需求，**未验证过就不能声称支持** | 有需要时 |
-| PostgreSQL | 两个引擎证明"抽象能用"，三个才证明"抽象是对的" | M5 可选 |
+| PostgreSQL | 两个引擎证明"抽象能用"，三个才证明"抽象是对的" | ✅ M5 后补做，见 §10 |
 | 方言转译（sqlglot） | 现在走"语义层 → 按能力编译"，不是"SQL → SQL" | 不做（见 `docs/10` §6） |
 | MySQL 的 `ONLY_FULL_GROUP_BY` 严格性 | 本机 `sql_mode` 恰好没有这一项，所以我们的 SQL 没被这样检验过 | 写进方言章作为已知边界 |
 
@@ -367,3 +369,72 @@ F 节验证：改这一个变量 → 装配成 MySQL 数据源 → 无 Key 时�
 7. **最小权限账号会把错误信息变模糊**（1305 → 1142）。排障时先想到这一层。
 8. **方言等价物常常不等价**（`%W` vs `%v`）。这类差异不报错，只出错——
    所以必须由语义层统一表达，而不是各处拼 SQL。
+
+---
+
+## 10. 后记：第三引擎 PostgreSQL（M5 后补做，2026-10）
+
+§8 那张"没做的事"表里写着：两个引擎证明"抽象能用"，三个才证明"抽象是对的"。
+这一节补上第三个：SQLite / MySQL / PostgreSQL 三个引擎共用同一套上层，
+30 题跨引擎逐题一致、端到端同分同失败集。
+
+### 10.1 核心层一行没改
+
+新增的只有一个适配器文件（`nl2sql/sources/postgres.py`）+ 配置/壳层各一个分支。
+`nl2sql/dialect/` 只加了一张数据表：`_DIALECT_TIME_GRAINS["postgres"]`。
+这与 M1 的结论汇合：**引擎差异是数据，不是分支**。
+
+### 10.2 PostgreSQL 特有的五个地方
+
+| 关注点 | SQLite | MySQL | PostgreSQL | 落在哪 |
+|---|---|---|---|---|
+| 标识符引用 | `"` | `` ` `` | `"` | capabilities |
+| 时间截断 | `strftime` | `DATE_FORMAT` | `TO_CHAR` / `EXTRACT` | 方言表 |
+| 生成列 | `PRAGMA table_xinfo` hidden | `EXTRA` 含 GENERATED | `attgenerated = 's'` | introspect |
+| 只读（第二层） | 只读 URI + authorizer | `START TRANSACTION READ ONLY` | 服务端 `SET TRANSACTION READ ONLY` | 适配器 |
+| 超时 | `progress_handler` | `max_execution_time` | `statement_timeout`（SQLSTATE 57014） | 适配器 |
+| 元数据 | `sqlite_master` / PRAGMA | `information_schema` | `pg_catalog` | introspect |
+
+时间粒度的 PG 表达式有一处容易写错：**周口径要对齐 SQLite 的 `%Y-%W`，
+不是 ISO 周年**（`%v`）。PG 的 `TO_CHAR` 也没有 `'Q'` 模式，季度得用
+`EXTRACT(QUARTER ...)`。这些表达式经过 182 个 golden 日期逐一比对，0 mismatch。
+
+### 10.3 验收结果
+
+- A 适配器契约：连接/能力/describe/截断/归一化（DATE→字符串、NUMERIC→float、金额合计）——全过
+- B 元数据等价：与 `SqliteAdapter` 逐表逐列比（列集合、可空、主键、生成列、顺序、外键、行数）
+- C 30 题逐题等价：两边按各自 capabilities 编译同一份逻辑计划，结果集**全部一致（30/30）**
+- D 端到端：两引擎各跑黄金集，**SQLite 29/30、PostgreSQL 29/30，失败题同为 D3**
+- E 只读与错误翻译：25006 只读拒写、42703 列不存在、42883 函数不存在，均带可行动提示
+- F 壳层：`NL2SQL_ADAPTER=postgres` 只改一个环境变量就换引擎，口令只从
+  `env:NL2SQL_PG_PASSWORD` 读（trust 认证允许为空）
+
+### 10.4 怎么跑（不需要管理员权限 / docker）
+
+PyPI 包 `embedded-postgres` 自带 PostgreSQL 18 的 Windows 二进制：
+
+```
+pip install embedded-postgres
+python tests/test_pg_engine.py
+```
+
+测试自己 `initdb` + 起 `postgres.exe`（不注册服务、不需要 pg_ctl），数据目录
+`data/_test_pg/pgdata`，首次建库并**从 SQLite 原样搬数**（保证"数据完全相同"，
+不在 PG 上重跑造数脚本），结束后关掉。找不到二进制时打印安装说明并返回 0 ——
+**未跑 ≠ 通过**。也可以用 `NL2SQL_PG_BIN` 指向任意 PostgreSQL 的 bin 目录。
+
+### 10.5 环境限制（本机实测，写下来免得重踩）
+
+- Windows 受限令牌下 `pg_ctl start` 报 `could not create restricted token: error code 87`，
+  改为直接跑 `postgres.exe`（绕开 pg_ctl 的 token 限制）。
+- 本沙箱里后端进程间信号被拦：`statement_timeout` 的定时器与
+  `pg_cancel_backend` 都不生效（`SHOW` 显示 200ms，`pg_sleep(1)` 照跑满）。
+  真实环境不受影响；测试里的"超时翻译"因此用服务端会返回的
+  SQLSTATE 57014 错误验证，并在输出里明示本环境不可验证。
+- 复用数据目录前会清 `postmaster.pid`；loader 子进程有 180s 超时兜底。
+
+### 10.6 未做
+
+- 写操作（与另两个引擎一致，生产只读）；
+- 生产级部署（连接池、SSL、多 schema 租户）——本阶段目标是"第三引擎证明抽象"，
+  不是"生产级 PostgreSQL 支持"。

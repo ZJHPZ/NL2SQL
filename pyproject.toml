@@ -23,6 +23,8 @@ semantic = ["sqlglot>=23.0", "pyyaml>=6.0"]
 # MySQL 数据源。直接用 pymysql，不引入 SQLAlchemy：
 # 适配器要的是"执行 + 描述结果"，ORM 那一层只会挡住方言细节（比如 %s 占位符）。
 mysql = ["pymysql>=1.1"]
+# PostgreSQL 数据源（第三引擎）。psycopg3，同样不走 SQLAlchemy。
+postgres = ["psycopg[binary]>=3.1"]
 # 编排引擎
 agent = ["langgraph>=0.2"]
 # 本地 Web 后端
