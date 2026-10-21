@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nl2sql-core"
-version = "0.1.0"
+# 版本号单一来源是 nl2sql/__init__.py:__version__，这里动态读，不再手写一份。
+# 三处（本文件 / nl2sql/__init__.py / apps/web/frontend/package.json）是否一致
+# 由 `python scripts/check_version.py` 检查，且已接进 pre-commit。
+dynamic = ["version"]
 description = "自然语言查询数仓的核心引擎：多数据源 + 可自定义 RAG 智库 + 可插拔智能体组件"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,10 +17,12 @@ license = { text = "Proprietary" }
 dependencies = []
 
 [project.optional-dependencies]
-# 语义层 + 方言编译
+# 方言的"语法体检"（可选）：装上就多一道解析告警，没装不影响编译。
+# 编译本身不依赖它——逻辑计划到 SQL 是确定性拼装，不做 AST 改写。
 semantic = ["sqlglot>=23.0", "pyyaml>=6.0"]
-# 数据源连接（MySQL 等）
-mysql = ["SQLAlchemy>=2.0", "pymysql>=1.1"]
+# MySQL 数据源。直接用 pymysql，不引入 SQLAlchemy：
+# 适配器要的是"执行 + 描述结果"，ORM 那一层只会挡住方言细节（比如 %s 占位符）。
+mysql = ["pymysql>=1.1"]
 # 编排引擎
 agent = ["langgraph>=0.2"]
 # 本地 Web 后端
@@ -25,20 +30,16 @@ web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 # 开发工具
 dev = ["pytest>=8.0", "pandas>=2.0"]
 
-[tool.setuptools]
-packages = [
-    "nl2sql",
-    "nl2sql.contracts",
-    "nl2sql.storage",
-    "nl2sql.sources",
-    "nl2sql.dialect",
-    "nl2sql.catalog",
-    "nl2sql.semantics",
-    "nl2sql.knowledge",
-    "nl2sql.guard",
-    "nl2sql.cache",
-    "nl2sql.agent",
-]
+[tool.setuptools.dynamic]
+version = { attr = "nl2sql.__version__" }
+
+# 自动发现 nl2sql 下所有子包。
+# 原先手写 11 个包名，漏了 llm / plugins / skills 三个 ——
+# 那种清单一定会随新增模块而过期，而且过期了没人会发现（本地跑得通，
+# 只有 pip install 之后才炸）。改成 find 一劳永逸。
+[tool.setuptools.packages.find]
+include = ["nl2sql*"]
+namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CHECKS = [
     ("层约束", "scripts/check_layers.py"),
     ("机密扫描", "scripts/scan_secrets.py"),
+    ("版本号一致性", "scripts/check_version.py"),
 ]
 
 
