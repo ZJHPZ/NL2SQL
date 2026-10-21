@@ -1,0 +1,52 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 运行时状态 ----
+# 状态目录：元数据库、知识库、结果缓存
+data/
+!data/.gitkeep
+*.db
+*.db-journal
+*.sqlite3
+
+# ---- 本地配置与凭据 ----
+# 绝不入库：连接配置、凭据引用、本地覆盖
+.env
+.env.*
+local.toml
+*.local.yaml
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 前端 ----
+# 依赖与构建产物都不入库：前者可由 package.json 还原，后者由 npm run build 产出
+node_modules/
+apps/web/frontend/dist/
+.npm-cache/
+npm-debug.log*
+*.tsbuildinfo
+
+# ---- 附件 ----
+# 题库原件与只读副本不入库
+~$*.xlsx
+
+# ---- 参考材料 ----
+# 第三方范本只用于阅读对照，不是本项目代码（MIT，原仓库 obra/superpowers）
+superpowers-main/
+
+# ---- 日志 ----
+*.log

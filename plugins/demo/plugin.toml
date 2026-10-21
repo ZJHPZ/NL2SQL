@@ -1,0 +1,13 @@
+[plugin]
+name = "demo"
+version = "1.0.0"
+description = "示例插件：演示如何注册自定义工具与 Prompt 模板"
+author = "talk-to-sql"
+entry = "plugin.py"
+
+# 声明需要的能力。**这是必须的**：
+# 未在此声明的能力不会被授予，对应的工具也不会被注册。
+requires = ["semantic.read", "source.read"]
+
+# 声明本插件提供的工具名（信息性，便于排查）
+tools = ["demo.profile_column", "demo.check_null_rate"]

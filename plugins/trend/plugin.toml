@@ -1,0 +1,10 @@
+[plugin]
+name = "trend"
+version = "0.1.0"
+description = "环比趋势分析：对比连续两个时间段的指标变化并给出变化率"
+author = "talk-to-sql"
+entry = "plugin.py"
+
+requires = ["source.read"]
+
+tools = ["trend.compare_periods"]

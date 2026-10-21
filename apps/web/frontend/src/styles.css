@@ -1,0 +1,387 @@
+/* 查询工作台样式。
+ *
+ * 取舍：单文件、无 UI 框架、无 CSS-in-JS。
+ * 界面元素有限（表格 / 表单 / 侧栏），引入组件库的收益不抵它的体积与升级成本。
+ * 深色配色是因为目标用户是开发者，且结果表以等宽数字为主。
+ */
+
+:root {
+  --bg: #0f1115;
+  --bg-soft: #161922;
+  --bg-raise: #1c2029;
+  --border: #2a2f3a;
+  --text: #dfe3ea;
+  --text-dim: #9aa3b2;
+  --accent: #4c8dff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.meta { color: var(--text-dim); font-size: 12px; }
+.spacer { flex: 1; }
+.tight { margin: 4px 0 0; padding-left: 18px; }
+.null { color: var(--text-dim); font-style: italic; }
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+/* ---------------------------------------------------------------- 顶栏 */
+.topbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 600; letter-spacing: .3px; }
+.topbar-info { display: flex; align-items: center; gap: 12px; }
+
+/* ---------------------------------------------------------------- 提问栏 */
+.askbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+.ask-input {
+  flex: 1; padding: 9px 12px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 14px;
+}
+.ask-input:focus { outline: none; border-color: var(--accent); }
+.nowfield {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--text-dim); font-size: 12px;
+}
+.nowfield input {
+  width: 108px; padding: 6px 8px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  font-family: var(--mono); font-size: 12px;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+.btn {
+  padding: 7px 13px; border-radius: 6px; cursor: pointer;
+  background: var(--bg-raise); color: var(--text);
+  border: 1px solid var(--border); font-size: 13px;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+.btn-ghost { background: transparent; }
+.btn-tiny { padding: 2px 7px; font-size: 11px; }
+.linkbtn {
+  background: none; border: none; color: var(--accent);
+  cursor: pointer; padding: 2px 0; text-align: left; font-size: 13px;
+}
+.linkbtn:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------- 徽标 */
+.badge {
+  padding: 1px 8px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 500;
+}
+.badge-ok { background: rgba(63,185,80,.16); color: var(--ok); }
+.badge-warn { background: rgba(210,153,34,.18); color: var(--warn); }
+.badge-bad { background: rgba(248,81,73,.16); color: var(--bad); }
+
+/* ---------------------------------------------------------------- 主区 */
+.main { display: flex; flex: 1; min-height: 0; }
+.work { flex: 1; overflow: auto; padding: 14px; min-width: 0; }
+.side {
+  width: 340px; flex: none; overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+/* ---------------------------------------------------------------- 状态条 */
+.statusbar {
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;
+  background: var(--bg-soft);
+}
+.statusbar.tone-ok { border-left-color: var(--ok); }
+.statusbar.tone-warn { border-left-color: var(--warn); }
+.statusbar.tone-bad { border-left-color: var(--bad); }
+.statusbar-main { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.meta-cached { color: var(--accent); }
+
+.alert {
+  margin-top: 8px; padding: 8px 10px; border-radius: 5px;
+  font-size: 13px; background: var(--bg-raise);
+  border-left: 2px solid var(--border);
+}
+.alert-warn { border-left-color: var(--warn); }
+.alert-bad { border-left-color: var(--bad); }
+.alert-info { border-left-color: var(--accent); }
+.alert strong { display: block; margin-bottom: 3px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.chip {
+  padding: 1px 8px; border-radius: 4px;
+  background: var(--bg); border: 1px solid var(--border);
+  font-size: 12px;
+}
+.chip-action { cursor: pointer; color: var(--accent); }
+.chip-action:hover { border-color: var(--accent); }
+
+.notes { margin-top: 8px; font-size: 12.5px; color: var(--text-dim); }
+.notes summary { cursor: pointer; }
+
+/* ---------------------------------------------------------------- SQL 面板 */
+.sqlpanel { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+.sqlpanel-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: var(--bg-raise);
+  border-bottom: 1px solid var(--border);
+}
+.sqlpanel-title { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.sqlpanel-editor {
+  width: 100%; display: block; resize: vertical;
+  padding: 10px 12px; border: none;
+  background: var(--bg); color: var(--text);
+  line-height: 1.6; tab-size: 2;
+}
+.sqlpanel-editor:focus { outline: none; }
+.sqlpanel-foot {
+  padding: 5px 10px; font-size: 11.5px; color: var(--text-dim);
+  background: var(--bg-raise); border-top: 1px solid var(--border);
+}
+
+/* ---------------------------------------------------------------- 结果表 */
+.result { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.result-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; background: var(--bg-raise);
+  border-bottom: 1px solid var(--border);
+}
+.filter-input {
+  width: 200px; padding: 5px 9px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; font-size: 12.5px;
+}
+.table-scroll { max-height: 62vh; overflow: auto; }
+
+table.grid { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+table.grid th, table.grid td {
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  text-align: left; white-space: nowrap;
+}
+table.grid thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-raise); font-weight: 600;
+}
+table.grid th.sortable { cursor: pointer; user-select: none; }
+table.grid th.sortable:hover { color: var(--accent); }
+table.grid td.num, table.grid th.num { text-align: right; }
+table.grid .rownum {
+  color: var(--text-dim); text-align: right; width: 52px;
+  background: var(--bg-soft);
+}
+table.grid tbody tr:hover td { background: rgba(76,141,255,.06); }
+.sortmark { margin-left: 4px; color: var(--accent); }
+
+/* ---------------------------------------------------------------- 结论区 */
+/* 智能体的散文回答与结果表是互补的：结论给判断，表格给明细。
+   放在 SQL 之上，因为用户先想知道"结论是什么"，再看"数是怎么来的"。 */
+.answer {
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-left-color: var(--accent);
+  border-radius: 6px; margin-bottom: 12px; overflow: hidden;
+}
+.answer-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: var(--bg-raise);
+  border-bottom: 1px solid var(--border);
+}
+.answer-title { font-size: 12px; font-weight: 600; color: var(--accent); }
+.answer-body {
+  padding: 11px 13px; font-size: 13.5px; line-height: 1.7;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* ---------------------------------------------------------------- 澄清 */
+.clarify-q {
+  margin: 5px 0 7px; font-size: 14px; color: var(--text);
+  font-weight: 500;
+}
+
+/* ---------------------------------------------------------------- 插件与工具管理 */
+.admin { padding: 0 0 20px; }
+.tabs.sub .tab { padding: 7px 4px; font-size: 12.5px; }
+
+.admin-section { padding: 12px; border-bottom: 1px solid var(--border); }
+.admin-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; margin-bottom: 6px;
+}
+.admin-hint {
+  font-size: 12px; color: var(--text-dim);
+  line-height: 1.6; margin-bottom: 9px;
+}
+.warn-text { color: var(--warn); }
+.ok-text { color: var(--ok); }
+
+.plugin-card {
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 8px 10px; margin-bottom: 7px; background: var(--bg);
+}
+.plugin-head { display: flex; align-items: center; gap: 8px; }
+.plugin-desc { font-size: 12px; color: var(--text-dim); margin: 3px 0; }
+/* 启动失败横幅：要显眼到用户不可能忽略 */
+.boot-fail { margin: 8px 12px; }
+.boot-fail ul { margin: 4px 0 4px 18px; }
+/* 未启用的插件：存在但没在跑，视觉上退到背景里 */
+.plugin-card.dim { opacity: .68; border-style: dashed; }
+.plugin-card.dim:hover { opacity: 1; }
+
+.tool-list, .cap-list { list-style: none; margin: 0; padding: 0; }
+.tool-list li, .cap-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.tool-list li.disabled { opacity: .55; }
+.tool-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.tool-desc { font-size: 12px; color: var(--text-dim); margin: 3px 0 0 20px; line-height: 1.5; }
+.tool-meta { margin-left: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+.cap-list li .switch { margin-right: 6px; }
+.cap-desc { font-size: 12px; color: var(--text-dim); margin: 3px 0 0 20px; }
+
+.switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.switch input { cursor: pointer; }
+
+.safety-box {
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 5px; padding: 9px 11px; margin-bottom: 10px; background: var(--bg);
+}
+.safety-title { font-size: 12px; font-weight: 600; margin-bottom: 5px; }
+.safety-row {
+  display: flex; justify-content: space-between;
+  font-size: 12px; padding: 2px 0;
+}
+.safety-note {
+  font-size: 11.5px; color: var(--text-dim);
+  margin-top: 6px; line-height: 1.6;
+  border-top: 1px solid var(--border); padding-top: 6px;
+}
+
+.form-row { margin-bottom: 9px; }
+.form-row label { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.form-row input {
+  width: 80px; padding: 5px 8px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-family: var(--mono); font-size: 12.5px;
+}
+.config-editor {
+  width: 100%; padding: 9px 10px; margin-bottom: 8px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  line-height: 1.6; resize: vertical;
+}
+
+/* ---------------------------------------------------------------- 空态 */
+.empty-block, .loading, .welcome {
+  border: 1px dashed var(--border); border-radius: 6px;
+  padding: 22px; text-align: center; color: var(--text-dim);
+}
+.empty-title, .welcome h2 { color: var(--text); margin: 0 0 6px; font-size: 15px; }
+.empty-hint { font-size: 13px; }
+.welcome { text-align: left; }
+.welcome h2 { font-size: 17px; }
+.examples { margin: 10px 0; padding-left: 20px; }
+.examples li { margin: 5px 0; }
+.loading { text-align: center; }
+
+/* ---------------------------------------------------------------- 表结构 */
+.tables-panel { padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-soft); }
+.table-card { margin-bottom: 10px; }
+.table-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 3px; }
+
+/* ---------------------------------------------------------------- 侧栏 */
+.tabs { display: flex; border-bottom: 1px solid var(--border); }
+.tab {
+  flex: 1; padding: 9px; background: none; border: none;
+  color: var(--text-dim); cursor: pointer; font-size: 13px;
+  border-bottom: 2px solid transparent;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.side-empty { padding: 18px; color: var(--text-dim); font-size: 13px; text-align: center; }
+
+.history-list { list-style: none; margin: 0; padding: 0; }
+.history-item {
+  display: block; width: 100%; text-align: left;
+  padding: 9px 12px; background: none; border: none;
+  border-bottom: 1px solid var(--border); cursor: pointer; color: var(--text);
+}
+.history-item:hover { background: var(--bg-raise); }
+.history-q {
+  font-size: 13px; margin-bottom: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.history-meta { display: flex; align-items: center; gap: 8px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot-ok { background: var(--ok); }
+.dot-bad { background: var(--bad); }
+
+.kb { padding: 12px; }
+.kb-section { margin-bottom: 18px; }
+.kb-title { font-weight: 600; font-size: 13px; margin-bottom: 5px; }
+.kb-hint { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.5; }
+.kb-test { display: flex; gap: 6px; }
+.kb-test input {
+  flex: 1; padding: 6px 9px; font-size: 12.5px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.kb-hits { margin-top: 9px; }
+.kb-hit {
+  padding: 7px 9px; margin-bottom: 6px; border-radius: 5px;
+  background: var(--bg); border: 1px solid var(--border);
+}
+.kb-hit-head { display: flex; align-items: center; gap: 7px; }
+.kb-hit-title { font-size: 12.5px; font-weight: 500; }
+.kb-hit-body {
+  font-size: 11.5px; color: var(--text-dim); margin-top: 3px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tag {
+  padding: 0 6px; border-radius: 3px; font-size: 10.5px;
+  background: var(--bg-raise); color: var(--text-dim); flex: none;
+}
+.tag-schema { color: #79c0ff; }
+.tag-business { color: #d2a8ff; }
+.tag-sql_pair { color: #7ee787; }
+.tag-correction { color: #ffa657; }
+
+.kb-list { list-style: none; margin: 0; padding: 0; }
+.kb-list li {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 0; border-bottom: 1px solid var(--border);
+}
+.kb-list li.disabled { opacity: .45; }
+.kb-item-title {
+  font-size: 12.5px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 150px;
+}
+
+/* ---------------------------------------------------------------- 启动失败 */
+.boot-error { padding: 40px; max-width: 760px; margin: 0 auto; }
+.boot-error pre {
+  background: var(--bg-soft); border: 1px solid var(--border);
+  padding: 14px; border-radius: 6px; white-space: pre-wrap;
+  color: var(--text-dim); font-size: 12.5px;
+}

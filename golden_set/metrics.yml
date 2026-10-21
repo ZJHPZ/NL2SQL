@@ -1,0 +1,506 @@
+# 黄金集（电商数仓）语义模型 —— 用 dbt 的指标规范表达
+#
+# 这份文件是"语义层兼容 dbt metrics.yml"这条决策的**验证物**：
+# 它必须能被 `nl2sql.semantics.dbt_loader` 读出与 `golden_model.build_model()`
+# **行为等价**的语义模型（30 道黄金题的计划与结果逐题一致）。
+# 做不到就说明加载器是假的，或者文档在吹。
+#
+# 写法约定
+# --------
+# * 指标优先用 **dbt 原生字段**（`calculation_method` + `expression` + `filters`），
+#   这样文件拿回 dbt 也能跑
+# * dbt 规范里确实没有的东西才写 `meta.nl2sql.*`（dbt 明确允许 meta 放任意键
+#   并原样忽略），并在注释里说明为什么
+# * 用 `columns:` 声明列名 —— 这正是它的用途：不连库也能知道表结构，
+#   加载器才能把 `substr(order_date, 1, 7)` 里的 `order_date` 补上表别名
+#
+# 验证方式
+# --------
+#   python -m nl2sql.semantics.dbt_loader golden_set/metrics.yml --show-sql
+#   python tests/test_s3b_dbt_loader.py
+version: 2
+
+semantic_models:
+  # ==================================================================== 事实表
+  - name: orders
+    model: ref('fact_order')
+    description: 订单明细（黄金集事实表）
+    meta:
+      nl2sql:
+        # 表别名固定写死：模型里所有表达式都按 `f.` 写，别名必须稳定。
+        # dbt 会按适配器规则自己起别名，所以这里只是我们的需要。
+        alias: f
+        version: golden-v1
+        # ↓↓ 以下三项 dbt 里没有等价物，属于**结构扩展**，拿回 dbt 跑不出同样的数
+        #
+        # 订单粒度视图：把商品属性并进 FROM，使"按月 × 品类"这类问题
+        # 不必为每个粒度各写一套指标/维度定义。
+        # dbt 的做法是另建一个 dbt model 把它物化掉——我们没有 dbt 运行时，
+        # 所以用一段派生表代替。语义完全相同。
+        logical_source: |
+          (
+              SELECT f.order_id, f.order_date, f.customer_id, f.channel_id,
+                     f.quantity, f.unit_price, f.discount_amount, f.order_status,
+                     f.amount, p.category, p.brand, p.unit_cost, p.product_name
+              FROM fact_order f
+              JOIN dim_product p ON f.product_id = p.product_id
+          )
+        logical_tables: [dim_product]
+        logical_join_key: f.order_id = o.order_id
+        # 指标表达式内部引用的维度（不属于输出分组，编译器不该 GROUP BY 它们）。
+        # dbt 里这个信息由 MetricFlow 从表达式推导，我们的编译器需要显式告知。
+        internal_dimensions:
+          [order_status, amount, discount_amount, quantity, unit_cost, customer_id]
+
+    # 实体 = 外键关系。**这是 dbt 自己的连接解析方式**，JOIN 由它推导，
+    # 不需要我们另写一份 join 配置。
+    entities:
+      - name: order
+        type: primary
+        expr: order_id
+      - name: customer
+        type: foreign
+        expr: customer_id
+      - name: channel
+        type: foreign
+        expr: channel_id
+
+    dimensions:
+      - name: order_date
+        type: time
+        expr: order_date
+        description: 下单日期
+        meta:
+          nl2sql:
+            synonyms: [日期, 下单时间]
+      # 时间粒度：`substr` 而不是 date_trunc —— 因为黄金库的 order_date 是
+      # TEXT（YYYY-MM-DD），这份表达式必须匹配真实存储类型。
+      # 真实 dbt 项目里应改用 `date_trunc('month', order_date)`。
+      - name: month
+        type: categorical
+        expr: substr(order_date, 1, 7)
+        description: 月份（YYYY-MM）
+        meta:
+          nl2sql:
+            synonyms: [月份, 按月, 每月]
+      - name: day
+        type: categorical
+        expr: substr(order_date, 1, 10)
+        description: 日期（YYYY-MM-DD）
+        meta:
+          nl2sql:
+            synonyms: [按天, 每日, 每天]
+      - name: status
+        type: categorical
+        expr: order_status
+        description: 订单状态
+        meta:
+          nl2sql:
+            synonyms: [订单状态, 状态]
+      # ---- 指标表达式引用的列，必须以维度形式存在（否则编译期找不到）----
+      - name: order_status
+        type: categorical
+        expr: order_status
+        description: 订单状态（指标口径引用）
+        meta:
+          nl2sql:
+            synonyms: [订单状态]
+      - name: amount
+        type: categorical
+        expr: amount
+        description: 成交金额（未减优惠）
+        meta:
+          nl2sql:
+            synonyms: [成交金额]
+      - name: discount_amount
+        type: categorical
+        expr: discount_amount
+        description: 优惠金额
+      - name: quantity
+        type: categorical
+        expr: quantity
+        description: 商品件数
+      - name: customer_id
+        type: categorical
+        expr: customer_id
+        description: 客户 ID（去重用）
+      # ---- 来自 dim_product，但已被 logical_source 并入 FROM，
+      #      所以 table 要标出来：编译器凭它判断"这张表已在 FROM 里，无需 JOIN"
+      - name: category
+        type: categorical
+        expr: category
+        description: 商品品类
+        meta:
+          nl2sql:
+            table: dim_product
+            synonyms: [品类, 商品品类, 类目, 分类]
+      - name: brand
+        type: categorical
+        expr: brand
+        description: 商品品牌
+        meta:
+          nl2sql:
+            table: dim_product
+            synonyms: [品牌, 商品品牌]
+      - name: product_name
+        type: categorical
+        expr: product_name
+        description: 商品名称
+        meta:
+          nl2sql:
+            table: dim_product
+            synonyms: [商品名称, 商品名, 货品]
+      - name: unit_cost
+        type: categorical
+        expr: unit_cost
+        description: 单位成本
+        meta:
+          nl2sql:
+            table: dim_product
+
+    columns:
+      - name: order_id
+      - name: order_date
+      - name: customer_id
+      - name: channel_id
+      - name: quantity
+      - name: unit_price
+      - name: discount_amount
+      - name: order_status
+      - name: amount
+      # logical_source 暴露出来的商品列
+      - name: category
+      - name: brand
+      - name: unit_cost
+      - name: product_name
+
+  # ==================================================================== 客户维
+  - name: customers
+    model: ref('dim_customer')
+    description: 客户维度
+    meta:
+      nl2sql:
+        alias: c
+    entities:
+      - name: customer
+        type: primary
+        expr: customer_id
+    dimensions:
+      - name: region
+        type: categorical
+        expr: region
+        description: 客户所属地区
+        meta:
+          nl2sql:
+            synonyms: [地区, 区域, 大区]
+      - name: customer_name
+        type: categorical
+        expr: customer_name
+        description: 客户姓名
+        meta:
+          nl2sql:
+            synonyms: [客户姓名, 客户名]
+      - name: customer_level
+        type: categorical
+        expr: customer_level
+        description: 客户等级
+        meta:
+          nl2sql:
+            synonyms: [客户等级, 会员等级, 等级]
+      # 计算维度：不是简单列，但仍是纯 SQL 表达式，所以**不需要** select 逃逸
+      - name: customer_type
+        type: categorical
+        expr: CASE WHEN is_new_customer = 1 THEN '新客户' ELSE '老客户' END
+        description: 新老客
+        meta:
+          nl2sql:
+            synonyms: [新客户, 老客户, 新客, 老客]
+    columns:
+      - name: customer_id
+      - name: customer_name
+      - name: region
+      - name: customer_level
+      - name: is_new_customer
+
+  # ==================================================================== 渠道维
+  - name: channels
+    model: ref('dim_channel')
+    description: 渠道维度
+    meta:
+      nl2sql:
+        alias: ch
+    entities:
+      - name: channel
+        type: primary
+        expr: channel_id
+    dimensions:
+      - name: channel
+        type: categorical
+        expr: channel_name
+        description: 销售渠道
+        meta:
+          nl2sql:
+            synonyms: [渠道, 平台]
+      - name: channel_type
+        type: categorical
+        expr: channel_type
+        description: 线上/线下
+        meta:
+          nl2sql:
+            synonyms: [线上渠道, 线下渠道]
+    columns:
+      - name: channel_id
+      - name: channel_name
+      - name: channel_type
+
+# ====================================================================== 指标
+metrics:
+  # ---- 原生写法：calculation_method + expression + filters --------------
+  # `filters` 会编译成条件聚合（CASE WHEN），不是 WHERE——所以"已支付"这个
+  # 条件只作用于指标本身，不会把分组里的其它行一起筛掉。
+  - name: net_revenue
+    label: 实收金额
+    model: ref('fact_order')
+    description: 已支付订单的成交金额减去优惠金额
+    calculation_method: sum
+    expression: amount - discount_amount
+    timestamp: order_date
+    time_grains: [day, month]
+    filters:
+      - field: order_status
+        operator: '='
+        value: "'已支付'"
+    meta:
+      nl2sql:
+        decimals: 2
+        synonyms: [销售额, 收入, 营收, 实收, 成交额, 实收额]
+
+  - name: gmv
+    label: GMV
+    model: ref('fact_order')
+    description: 成交金额，含优惠、不剔除退款
+    calculation_method: sum
+    expression: amount
+    timestamp: order_date
+    time_grains: [day, month]
+    filters:
+      - field: order_status
+        operator: '<>'
+        value: "'已取消'"
+    meta:
+      nl2sql:
+        synonyms: [成交总额, gmv]
+
+  - name: paid_order_count
+    label: 有效订单数
+    model: ref('fact_order')
+    description: 已支付订单笔数
+    # count 不写 expression → COUNT(*)；带 filters 时自动变成条件聚合计数
+    calculation_method: count
+    timestamp: order_date
+    time_grains: [day, month]
+    filters:
+      - field: order_status
+        operator: '='
+        value: "'已支付'"
+    meta:
+      nl2sql:
+        synonyms: [有效订单, 订单量, 订单数, 单量, 订单笔数, 多少笔]
+
+  - name: all_order_count
+    label: 全部订单数
+    model: ref('fact_order')
+    description: 含退款与取消的全部订单笔数
+    calculation_method: count
+    timestamp: order_date
+    meta:
+      nl2sql:
+        synonyms: [全部订单, 总订单, 订单总数]
+
+  - name: refunded_order_count
+    label: 退款订单数
+    model: ref('fact_order')
+    description: 已退款订单笔数
+    calculation_method: count
+    timestamp: order_date
+    filters:
+      - field: order_status
+        operator: '='
+        value: "'已退款'"
+    meta:
+      nl2sql:
+        synonyms: [退款订单, 退款单数, 已退款订单数]
+
+  - name: customer_count
+    label: 客户数
+    model: ref('fact_order')
+    description: 去重客户数
+    calculation_method: count_distinct
+    expression: customer_id
+    timestamp: order_date
+    meta:
+      nl2sql:
+        synonyms: [客户数, 消费客户数, 买家数, 人数, 多少人, 客户有多少]
+
+  # ---- 这两条把聚合写进了 expression ----------------------------------
+  # 为什么：口径里的 `ELSE 0` 是作者显式写的（"未支付记 0 而不是 NULL"）。
+  # 条件聚合的自动写法 `SUM(CASE WHEN c THEN x END)` 数值上等价，但**文本不同**，
+  # 而这份文件的目标是与参考模型逐字对齐。
+  # 加载器检测到 expression 已自带聚合就不会再包一层（否则会变成 SUM(SUM(x))）。
+  - name: quantity_total
+    label: 销量
+    model: ref('fact_order')
+    description: 已支付订单的商品件数
+    calculation_method: sum
+    expression: >-
+      SUM(CASE WHEN order_status = '已支付'
+          THEN quantity ELSE 0 END)
+    timestamp: order_date
+    meta:
+      nl2sql:
+        synonyms: [销量, 件数, 售出数量, 卖出多少]
+
+  - name: cost_total
+    label: 商品成本
+    model: ref('fact_order')
+    description: 已支付订单的商品成本合计
+    calculation_method: sum
+    expression: >-
+      SUM(CASE WHEN order_status = '已支付'
+          THEN quantity * unit_cost ELSE 0 END)
+    timestamp: order_date
+    meta:
+      nl2sql:
+        synonyms: [成本, 商品成本, 成本合计]
+
+  - name: max_order_amount
+    label: 最高成交金额
+    model: ref('fact_order')
+    description: 已支付订单中的最大成交金额
+    calculation_method: max
+    expression: amount
+    timestamp: order_date
+    filters:
+      - field: order_status
+        operator: '='
+        value: "'已支付'"
+    meta:
+      nl2sql:
+        synonyms: [最高成交金额, 最高金额, 最高一笔, 最大金额]
+
+  # ---- 派生指标：expression 里直接写指标名（dbt 原生写法）-------------
+  # 加载器把裸指标名换成内部引用；口径只有一份，改一处不会漏另一处。
+  - name: gross_margin
+    label: 毛利率
+    model: ref('fact_order')
+    description: (实收金额 - 商品成本) / 实收金额
+    calculation_method: derived
+    expression: (net_revenue - cost_total) * 1.0 / NULLIF(net_revenue, 0)
+    meta:
+      nl2sql:
+        decimals: 4
+        ratio: true
+        synonyms: [毛利率, 利润率]
+
+  - name: customer_unit_price
+    label: 客单价
+    model: ref('fact_order')
+    description: 实收金额 / 去重客户数
+    calculation_method: derived
+    expression: net_revenue * 1.0 / NULLIF(customer_count, 0)
+    meta:
+      nl2sql:
+        decimals: 2
+        synonyms: [客单价, 人均消费, 人均金额]
+
+  # ---- latest 规范：type: ratio（比 derived 更贴合语义）----------------
+  - name: refund_rate
+    label: 退款率
+    model: ref('fact_order')
+    description: 已退款订单数 / 全部订单数
+    type: ratio
+    numerator: refunded_order_count
+    denominator: all_order_count
+    meta:
+      nl2sql:
+        decimals: 4
+        ratio: true
+        synonyms: [退款率, 退货率]
+
+  # ---- 窗口指标：dbt 规范里**没有**等价物 ------------------------------
+  # dbt 把"占比/排名"交给 BI 层，或用 ratio/cumulative 类型近似；
+  # 没有"在聚合结果之上再开窗"的表达。这就是结构扩展存在的理由，也是
+  # 可移植性报告里这两条会被标出来的原因。
+  - name: revenue_share
+    label: 占比
+    model: ref('fact_order')
+    description: 该分组的实收金额占全量比例
+    calculation_method: derived
+    expression: net_revenue * 1.0 / NULLIF(SUM(net_revenue) OVER (), 0)
+    meta:
+      nl2sql:
+        window: true          # ← dbt 无等价物
+        decimals: 4
+        ratio: true
+        synonyms: [占比, 比重, 份额, 占全渠道, 占总量, 占全部]
+
+  - name: revenue_rank
+    label: 排名
+    model: ref('fact_order')
+    description: 按实收金额的降序排名（窗口指标）
+    calculation_method: derived
+    expression: RANK() OVER (ORDER BY net_revenue DESC)
+    meta:
+      nl2sql:
+        window: true          # ← dbt 无等价物
+        synonyms: [排名, 排行]
+
+  # ---- 累计：按分组的时间维度滚动求和 --------------------------------
+  # `OVER (ORDER BY month)` 里的 month 是**分组维度**。编译器会把它
+  # 解析成内层 CTE 的列名，并要求它出现在 plan.dimensions 里——
+  # 否则报一个能照着改的错，而不是生成查不动的 SQL。
+  #
+  # dbt 有 `type: cumulative` 做类似的事，但那个需要 time spine（时间骨架表），
+  # 且语义是"每个时间点的累计值"，与"在这个查询的分组上开窗"不同。
+  # 所以这里仍然走窗口扩展。
+  - name: cumulative_net_revenue
+    label: 累计实收金额
+    model: ref('fact_order')
+    description: 实收金额按月累计（含当月）
+    calculation_method: derived
+    expression: >-
+      SUM(net_revenue) OVER (ORDER BY month
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+    meta:
+      nl2sql:
+        window: true          # ← dbt 无等价物
+        decimals: 2
+        synonyms: [累计实收金额, 累计实收, 累计金额, 累计值]
+
+  # ---- 分组内排名（PARTITION BY 分组维度）----------------------------
+  # 与上面的 revenue_rank 不同：那个是全局排名，这个是**组内**排名。
+  - name: customer_rank_in_region
+    label: 地区内排名
+    model: ref('fact_order')
+    description: 客户在自己所属地区内按实收金额的排名
+    calculation_method: derived
+    expression: RANK() OVER (PARTITION BY region ORDER BY net_revenue DESC)
+    meta:
+      nl2sql:
+        window: true          # ← dbt 无等价物
+        synonyms: [地区内排名, 地区内名次, 区域内排名]
+
+  # 分组内 TopN 的排序依据。**前几由计划层的 qualify 决定，不写进指标**——
+  # 否则"前2"和"前3"要各写一个指标，语义模型会被问法撑爆。
+  - name: product_rank_in_category
+    label: 品类内名次
+    model: ref('fact_order')
+    description: 商品在自己所属品类内按销量的名次（并列按商品名稳定）
+    calculation_method: derived
+    expression: >-
+      ROW_NUMBER() OVER (PARTITION BY category
+      ORDER BY quantity_total DESC, product_name)
+    meta:
+      nl2sql:
+        window: true          # ← dbt 无等价物
+        synonyms: [品类内名次, 品类内排名, 商品排名]

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nl2sql-core"
+version = "0.1.0"
+description = "自然语言查询数仓的核心引擎：多数据源 + 可自定义 RAG 智库 + 可插拔智能体组件"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+
+# 核心依赖刻意保持极小：个人场景零配置优先
+dependencies = []
+
+[project.optional-dependencies]
+# 语义层 + 方言编译
+semantic = ["sqlglot>=23.0", "pyyaml>=6.0"]
+# 数据源连接（MySQL 等）
+mysql = ["SQLAlchemy>=2.0", "pymysql>=1.1"]
+# 编排引擎
+agent = ["langgraph>=0.2"]
+# 本地 Web 后端
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+# 开发工具
+dev = ["pytest>=8.0", "pandas>=2.0"]
+
+[tool.setuptools]
+packages = [
+    "nl2sql",
+    "nl2sql.contracts",
+    "nl2sql.storage",
+    "nl2sql.sources",
+    "nl2sql.dialect",
+    "nl2sql.catalog",
+    "nl2sql.semantics",
+    "nl2sql.knowledge",
+    "nl2sql.guard",
+    "nl2sql.cache",
+    "nl2sql.agent",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+# ---------------------------------------------------------------------------
+# apps/ 不打包进核心分发物：三个壳各自独立构建。
+# 这样核心可被第三方直接 pip install，而不被迫带上 FastAPI。
+# ---------------------------------------------------------------------------
