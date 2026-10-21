@@ -17,12 +17,15 @@ C 与 D 分开是有意的：
     D 失败 = 装配/链路的问题（改那里）
 混在一起就分不清是谁的错。
 
-已知的方向性差异（不是 bug，是 M3 的待办）
-------------------------------------------
-C3 用 `strftime('%Y-%W', order_date)` 按 ISO 周分桶 —— 这是**写死在逻辑计划里**
-的 SQLite 函数，MySQL 上没有。这条不在 M1 修：正确的修法是"时间粒度作为
-一等公民"（M3 的 grain），让计划说"按周"，由方言层各自实现。
-本测试把它作为**已知失败**显式打印并断言其失败原因，而不是让它静默通过。
+已知的方向性差异（M3 已闭合）
+------------------------------
+C3 曾经用 `strftime('%Y-%W', order_date)` 按周分桶 —— 这是**写死在计划里**
+的 SQLite 函数，MySQL 上没有。M1 当时把它作为已知失败显式打印，正确的修法
+写在了待办里：时间粒度作为一等公民，计划说"按周"，由方言层各自展开。
+
+M3 已完成这件事（`DimensionDefinition.grain`）。本节从
+"29 一致 + 1 题已知方言失败"变成 **30/30 逐题一致**：C3 现在在两个引擎上
+都返回 26 个周桶，且用的是各自方言的截断函数。
 
 运行:
     set NL2SQL_MYSQL_PASSWORD=...   # 或由 .env 提供
@@ -225,9 +228,6 @@ def section_c(mysql_adapter: MysqlAdapter, sqlite_adapter: SqliteAdapter,
     my_comp = SqlCompiler(mysql_adapter.capabilities)
     sq_comp = SqlCompiler(sqlite_adapter.capabilities)
 
-    # 已知的方言依赖：题号 → 期望在 MySQL 上失败的原因关键字
-    KNOWN_DIALECT_GAP = {"C3": "strftime"}
-
     status: dict[str, str] = {}
     for qid in sorted(PLANS):
         plan = PLANS[qid]
@@ -244,21 +244,8 @@ def section_c(mysql_adapter: MysqlAdapter, sqlite_adapter: SqliteAdapter,
         try:
             r_m = mysql_adapter.execute(sql_m, limit=5000, timeout_s=15)
         except Exception as exc:  # noqa: BLE001
-            hint = KNOWN_DIALECT_GAP.get(qid)
-            text = str(exc)
-            if hint and hint in sql_m:
-                status[qid] = "known_gap"
-                info(f"[{qid}] 已知方言依赖，MySQL 上按预期失败",
-                     f"{text[:70]}")
-            else:
-                check(False, f"[{qid}] MySQL 执行失败", f"{text[:160]}")
-                status[qid] = "mysql_error"
-            continue
-
-        if qid in KNOWN_DIALECT_GAP:
-            check(False, f"[{qid}] 已知方言依赖却跑通了（该题的预期失效，需复核）",
-                  sql_m[:100])
-            status[qid] = "unexpected_pass"
+            check(False, f"[{qid}] MySQL 执行失败", f"{str(exc)[:160]}")
+            status[qid] = "mysql_error"
             continue
 
         ok = rows_equal(r_s.rows, r_m.rows)

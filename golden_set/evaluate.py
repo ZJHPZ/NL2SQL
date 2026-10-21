@@ -9,6 +9,9 @@
     # 2) 评测模型产出（JSONL，每行 {"id": "A1", "sql": "..."}）
     python evaluate.py predictions.jsonl
 
+    # 3) 按类别报告（论文实验章需要"哪一类弱"，不只是总分）
+    python evaluate.py predictions.jsonl --by-category
+
 判分规则:
     PASS         结果集一致（行序无关、列名无关、值按数值等价比较）
     ROW_MISMATCH 可执行但结果不一致
@@ -112,7 +115,32 @@ def load_baseline():
         return json.load(f)
 
 
-def evaluate(pred_path=None):
+def _print_by_category(cases, details) -> None:
+    """按题目类别汇总（A–F 各自准确率）。
+
+    只看总分会被两类题互相抵消：语义层改动让"时间趋势"涨 2 题、却让
+    "窗口与排名"跌 2 题，总分不变但问题被藏起来了。论文里要能指出
+    "弱在哪个能力上"，所以分类别报告是判分器的一部分。
+    """
+    status = {cid: st for cid, st, _msg in details}
+    order: list[str] = []
+    agg: dict[str, list[int]] = {}   # 类别 -> [通过, 总数]
+    for c in cases:
+        cat = c.get("category", "未分类")
+        if cat not in agg:
+            agg[cat] = [0, 0]
+            order.append(cat)
+        agg[cat][1] += 1
+        if status.get(c["id"]) == "PASS":
+            agg[cat][0] += 1
+    print(f"{'类别':<14}{'通过/总数':>10}{'准确率':>9}")
+    print("-" * 36)
+    for cat in order:
+        p, n = agg[cat]
+        print(f"{cat:<14}{p:>5}/{n:<5}{p / n:>9.1%}")
+
+
+def evaluate(pred_path=None, by_category=False):
     base = load_baseline()
     cases = base["cases"]
 
@@ -171,10 +199,14 @@ def evaluate(pred_path=None):
         if status != "PASS" or pred_path is None:
             if status != "PASS":
                 print(f"  {mark} [{cid}] {status}: {msg}")
+    if by_category:
+        print()
+        _print_by_category(cases, details)
     return stats
 
 
 if __name__ == "__main__":
     _setup_stdout()
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    evaluate(path)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    evaluate(args[0] if args else None,
+             by_category="--by-category" in sys.argv[1:])

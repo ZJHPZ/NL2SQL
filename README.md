@@ -27,6 +27,7 @@
 | **P0b** | **技能机制（`SKILL.md`）：发现 / 报告 / `skill.load` / 界面第四块** | ✅ 见 `docs/08` |
 | **M1** | **第二个引擎：MySQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11` |
 | **M2** | **LangGraph 执行器 + SSE 流式（两执行器等价性验收）** | ✅ 见 `docs/12` |
+| **M3** | **语义层两个原语：时间粒度 + 标量比较（黄金集 29/30）** | ✅ 见 `docs/13` |
 | S7–S9 | SDK / 多方言 / 开题后的其余引擎 | ⬜ |
 
 ### 插件与工具管理
@@ -224,6 +225,16 @@ python tests/test_s3c_expressiveness.py
 > 流式：`GET /api/query/stream`（SSE，首字节实测 <0.5s）。
 > 详见 **`docs/12-LangGraph执行器与等价性.md`**。
 
+> **语义层补了两个原语**（M3）：**时间粒度 `grain`**（维度只声明"这是哪个桶"，
+> 截断由编译器按 sqlite `strftime` / mysql `DATE_FORMAT` 展开，`month`/`day`
+> 也从 `substr` 迁了过来）与 **标量比较 `ScalarCompare(measure, against, op,
+> factor)`**（`against` 显式区分"整表平均"与"当前结果集平均"——选错会安静地
+> 返回一组合理答案）。规则规划器黄金集 **25/30 → 29/30 = 96.7%**，唯一失败
+> D3 是黄金集题面与 SQL 口径不一致；顺带把 M1 的 C3 跨引擎缺口**正确**闭合
+> （`tests/test_m1_mysql.py` C 节 29+1 → **30/30**）。
+> 留出集 20 题在 `golden_set/heldout.json`（**开发期不跑**，M4 才用）。
+> 详见 **`docs/13-语义表达力.md`**。
+
 实施中发现的问题记录在六处文档：
 - S2 两个静默失效坑（SQLite 只读 URI、FTS5 中文分词）→ `docs/02` 第 16 节
 - S3 编译器五个坑 → `docs/02` 第 17 节
@@ -243,6 +254,11 @@ python tests/test_s3c_expressiveness.py
   首字节必须用真 uvicorn 量）+ 三个设计坑（`emit` 参数名与载荷撞车、
   事件接收器不能挂在共享 core 上、空 TypedDict 状态变 None）
   → `docs/12` 第 5 节
+- M3 一个"只在问过别的题之后才出现"的坑（规划器会向共享语义模型注册条件聚合
+  指标，短 label"订单数"子串命中"全部订单数"，B6 从 2 列变 4 列；单题测试
+  永远绿）+ 三个语义层细节（`grain` 的 SELECT/GROUP BY/ORDER BY/HAVING/WHERE
+  必须走同一出口、周桶 `%u` 与 `%v` 语义不同、`pivot+having/qualify` 仍未解开）
+  → `docs/13` 第 2/4/7 节
 
 ---
 
@@ -291,9 +307,11 @@ talk-to-sql/
 │   └── internal/        壳③ 内部工具
 │
 ├── golden_set/          黄金评测集（30 题 + 判分器）
-│   └── metrics.yml      黄金语义模型的 **dbt 语法版本**（等价性验收物）
+│   ├── metrics.yml      黄金语义模型的 **dbt 语法版本**（等价性验收物）
+│   └── heldout.json     **留出集 20 题**（M3 写完、开发期不跑，M4 实验用）
 ├── scripts/             开发工具
 │   ├── check_layers.py  层依赖检查（架构约束可执行化）
+│   ├── make_heldout.py  留出集基线生成/校验（手写 SQL 执行出答案）
 │   └── scaffold.py      模块骨架生成
 ├── docs/                设计与边界文档
 │   ├── 08-技能设计草案.md  "声明式档 = SKILL.md" 的设计草案（待拍板）
@@ -365,6 +383,13 @@ python tests/test_m1_mysql.py
 #     SSE 首字节用线程内真 uvicorn 量（TestClient 会把响应缓冲完，量不出首字节）
 python tests/test_m2_langgraph.py
 python tests/test_m2_langgraph.py --require-live   # 需 Key：30 题逐题一致（未跑 ≠ 通过）
+
+# 5f) 语义表达力验收（离线：时间粒度 + 标量比较，含黄金集 29/30 与 D3 口径说明）
+python tests/test_m3_semantics.py
+# 留出集只校验完整性，**不跑规划器**（开发期不跑，M4 才用）
+python scripts/make_heldout.py --check
+# 按类别看准确率（论文实验章用；自检时 30/30，预测文件传入时按类汇总）
+python golden_set/evaluate.py --by-category
 
 # 5c) 智能体真实模型验收（需 Key）
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx'
@@ -439,7 +464,9 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | `docs/07-语义层表达能力.md` | 缺口清单、四个真坑、四种规划器实测 |
 | `docs/08-技能设计草案.md` | 声明式档（`SKILL.md`）、P0 实施记录、P1–P3 待拍板 |
 | `docs/09-参考实现-superpowers.md` | 可迁移的五条、不该抄的四条 |
-| `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、29/30 等价、**判分器漂移**、只读账号与 `credential_ref` |
+| `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、**判分器漂移**、只读账号与 `credential_ref`；C3 缺口由 M3 闭合（C 节 30/30） |
+| `docs/12-LangGraph执行器与等价性.md` | 单步状态机、图谱、两执行器等价性、SSE 首字节、五个"数字不对"的坑 |
+| `docs/13-语义表达力.md` | 时间粒度与标量比较、`against` 的歧义建模、共享语义模型的顺序依赖 bug、29/30 与 D3 口径说明 |
 | `golden_set/README.md` | 评测集用法、口径约定、多方言扩展 |
 | `方案骨架.md` | 项目定位、分层骨架、决策记录、待定项 |
 | `题库分析.md` | 3,378 题题库评估：为何不能当黄金集、改用途建议 |
@@ -455,9 +482,9 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 
 | 月 | 主题 | 硬验收 |
 |---|---|---|
-| M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致**（实测 29/30，差的 C3 是计划内方言缺口） |
-| M2 | LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 outcome **逐题一致**，首字节 <1s |
-| M3 | 语义层两个原语（时间粒度、标量比较） | 黄金集 ≥28/30 |
+| M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致**（M3 后 C 节已 30/30；D 节两端 29/30 同失败集） |
+| M2 | **已完成**：LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 outcome **逐题一致**，首字节 <1s |
+| M3 | **已完成**：语义层两个原语（时间粒度、标量比较） | 黄金集 **29/30 = 96.7%**（≥28/30）；D3 为黄金集口径不一致 |
 | M4 | 实验（覆盖率扫描、口径漂移、消融） | 四张表 + 一张曲线 |
 | M5 | 体验、统计、真实试用 | ≥20 条真实问题 |
 | M6 | 成文与答辩演示 | 预答辩通过 |

@@ -28,6 +28,7 @@ from ..contracts.semantic import (
     PivotBucket,
     PlanDimension,
     PlanMeasure,
+    ScalarCompare,
     SemanticModel,
     SemanticResolutionError,
     TimeRange,
@@ -63,6 +64,16 @@ _GRAIN_WORDS = {
     "week": ("按周", "每周", "周度", "各周"),
     "quarter": ("按季度", "每季度", "季度"),
     "year": ("按年", "每年", "年度"),
+}
+# 粒度 → 语义模型里承载该粒度的维度名。
+# 单独一张表而不是在判断里写字面量：维度名可以叫别的（比如 `周`），
+# 规划器只负责"知道要哪个粒度"，不负责"猜维度叫什么"。
+_GRAIN_DIMS = {
+    "day": "day",
+    "week": "week",
+    "month": "month",
+    "quarter": "quarter",
+    "year": "year",
 }
 # "分组"信号词：出现时才把维度当作分组维度。
 # 必须区分两类词，混淆会造成静默错误：
@@ -364,6 +375,7 @@ class RulePlanner:
             having=tuple(adv.having),
             qualify=tuple(adv.qualify),
             pivot=adv.pivot,
+            compare=adv.compare,
             notes=tuple(adv.notes) or ("由规则规划器解析（未使用模型）",),
         )
 
@@ -473,7 +485,85 @@ class RulePlanner:
                     "★ 分类转列：把维度取值转成列（与跨期对比同一机制）"
                 )
 
+        # ------------------------------------------- 6) 标量比较（与平均/均值比）
+        # 放在最后：它与透视/组内排名互斥（编译器会拒绝这种组合），
+        # 而且依赖前面已确定的指标列表。
+        if adv.pivot is None and not adv.qualify:
+            comp = self._match_scalar_compare(original, metrics)
+            if comp is not None:
+                adv.compare = comp
+                scope = "当前结果集" if comp.against == "result" else "整表"
+                adv.notes.append(
+                    f"★ 标量比较：{comp.measure} {comp.op} "
+                    f"{scope}平均×{comp.factor:g}"
+                    f"（不是 HAVING——比的是聚合值，不是常量）"
+                )
+
         return adv
+
+    def _match_scalar_compare(self, question: str,
+                              metrics: list[str]) -> ScalarCompare | None:
+        """识别"聚合值高于/低于平均值"（标量子查询比较）。
+
+        判据：同一小句里出现 `<比较词>…平均/均值`。没有"平均"就返回 None
+        ——"实收金额高于 5000"是 HAVING 或行级过滤，跟标量比较是两件事，
+        混淆会得到"先按组求和、再和 5000 比"这种口径完全不同的答案。
+
+        **against 的两种含义必须区分**（见 ScalarCompare 的 docstring）：
+        用户说"全部客户平均"是整表平均（all）；说"组内/各组/各自平均"
+        是当前结果集平均（result）。默认 all——中文里单说"高于平均"
+        通常指全体平均，而不是"这组自己跟自己比"。
+
+        为什么被比较的指标取"比较词之前最近出现"的那个：F1 这类句子里
+        指标词会出现两次（"消费金额高于…平均消费金额"），第一次才是
+        被比较的对象，第二次只是复述平均值的口径。
+        """
+        m = _SCALAR_COMPARE_RE.search(question)
+        if m is None:
+            return None
+        op = _SCALAR_OP.get(m.group(1))
+        if op is None:
+            return None
+        head = question[:m.start(1)]
+
+        def words(mt: MetricDefinition, name: str) -> list[str]:
+            return [w for w in (mt.label, *mt.synonyms, name) if w]
+
+        # 优先"比较词之前出现"的指标：F1 这类句子里指标词会出现两次
+        #（"消费金额高于…平均消费金额"），第一个才是被比较的对象，
+        # 第二个只是平均值的口径复述。
+        best, best_pos = None, -1
+        for name in metrics:
+            mt = self._model.metrics.get(name)
+            if mt is None or mt.window:
+                continue
+            for w in words(mt, name):
+                pos = head.rfind(w)
+                if pos > best_pos:
+                    best, best_pos = name, pos
+        if best is None:
+            # 退化：指标词只出现在"平均"那一侧（"高于平均消费金额"）。
+            # 不能因此放弃识别——那会让这类问法安静地退化成"没有比较"。
+            earliest, earliest_pos = None, 10 ** 6
+            for name in metrics:
+                mt = self._model.metrics.get(name)
+                if mt is None or mt.window:
+                    continue
+                for w in words(mt, name):
+                    pos = question.find(w)
+                    if 0 <= pos < earliest_pos:
+                        earliest, earliest_pos = name, pos
+            best = earliest
+        if best is None:
+            return None
+        against = "result" if any(
+            w in question for w in _SCALAR_RESULT_HINTS) else "all"
+        factor = 1.0
+        fm = _SCALAR_FACTOR_RE.search(question)
+        if fm:
+            factor = float(fm.group(1))
+        return ScalarCompare(measure=best, against=against, op=op,
+                             factor=factor)
 
     def _match_having(self, question: str, metrics: list[str],
                       dims: list[str]) -> list[Having]:
@@ -869,16 +959,10 @@ class RulePlanner:
         wants_grain = bool(tr is not None and (
             tr.explicit_grain or _has_grain_word(src, stripped_grain)
         ))
-        if wants_grain and stripped_grain in ("month", "day"):
-            dim_name = {"month": "month", "day": "day"}[stripped_grain]
-            if dim_name in self._model.dimensions and dim_name not in dims:
-                dims.insert(0, dim_name)
-            if tr.grain == "month" and "month" in self._model.dimensions:
-                if "month" not in dims:
-                    dims.insert(0, "month")
-            if tr.grain == "day" and "day" in self._model.dimensions:
-                if "day" not in dims:
-                    dims.insert(0, "day")
+        grain_dim = _GRAIN_DIMS.get(stripped_grain or "")
+        if wants_grain and grain_dim and grain_dim in self._model.dimensions:
+            if grain_dim not in dims:
+                dims.insert(0, grain_dim)
         # 比率/累计类指标自带分子分母，分组维度不应被其描述文字带出
         if {"refund_rate", "refunded_order_count"} & set(have_metrics):
             dims = [d for d in dims if d != "status"]
@@ -1042,12 +1126,15 @@ class _Advanced:
 
     __slots__ = ("having", "qualify", "pivot", "measures", "dimensions",
                  "filters", "notes", "drop_measures", "drop_dimensions",
-                 "drop_time_range", "drop_limit")
+                 "drop_time_range", "drop_limit", "compare")
 
     def __init__(self) -> None:
         self.having: list[Having] = []
         self.qualify: list[Having] = []
         self.pivot: Pivot | None = None
+        # 标量比较（"高于平均"）与 having/qualify 是三种**不同**的聚合后过滤：
+        # having 比常量、qualify 比窗口值、compare 比另一个聚合的标量。
+        self.compare: ScalarCompare | None = None
         self.measures: list[str] = []
         self.dimensions: list[str] = []
         self.filters: list[Filter] = []
@@ -1072,6 +1159,25 @@ _HAVING_OP = {
     "低于": "<", "小于": "<", "不足": "<",
     "不高于": "<=", "以下": "<=",
 }
+
+# 标量比较：聚合值与"另一个聚合值"比（"高于平均"）。
+# 与 _HAVING_RE 的区别不是写法而是**比较对象**：这里比的是平均值（没有数字）。
+# 要求比较词与"平均/均值"在同一小句内（中间不跨逗号/句号），
+# 否则"销量最高的品类，高于平均水平的品类"这种跨句表达会误把两件事连起来。
+_SCALAR_COMPARE_RE = re.compile(
+    r"(不超过|不低于|不高于|高于|超过|大于|多于|超出|低于|小于|少于|不足)"
+    r"[^，。；？]{0,10}?(?:平均|均值)"
+)
+# 比较词 → 操作符。长词在前：正则按顺序尝试，"不低于"必须先于"低于"。
+_SCALAR_OP = {
+    "超过": ">", "大于": ">", "高于": ">", "多于": ">", "超出": ">",
+    "不低于": ">=",
+    "低于": "<", "小于": "<", "少于": "<", "不足": "<",
+    "不高于": "<=", "不超过": "<=",
+}
+_SCALAR_FACTOR_RE = re.compile(r"(\d+(?:\.\d+)?)\s*倍")
+# "高于组内平均"是当前结果集的平均，不是整表平均——分母不同，答案不同。
+_SCALAR_RESULT_HINTS = ("组内", "本组", "各组", "各自", "同类内", "同类")
 
 # 中文数字（"前二""前三"）
 _CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
@@ -1202,6 +1308,12 @@ def _first_pos(question: str, dim_name: str, model: SemanticModel) -> int:
     return min(positions) if positions else 10 ** 6
 
 
+# "占…的比例/占比/比重/率"——分母陈述的边界。用全句搜索而不是
+# 从指标 label 往前找：B6 的"退款率"只在句尾"列出地区和退款率"出现，
+# 按 label 定位会离"占"太远，读不到分母。
+_INSIDE_RATIO_RE = re.compile(r"占[^，。；？]*?(?:的)?(?:比例|占比|比重|率)")
+
+
 def _is_explanatory(label: str, question: str,
                     model: SemanticModel) -> bool:
     """问句是否把该比率当"解释"而非"要输出的列"。
@@ -1212,30 +1324,48 @@ def _is_explanatory(label: str, question: str,
         "实收金额占全渠道总实收金额的比例是多少"     → 列举型
             （"占"后面出现了"实收金额"，用户明确要这一列）
 
-    判据：取"占…的比例|率"之间的分母陈述，看它是否**包含其它指标的 label**。
-    包含 → 用户在指名要那一列，不能剪。
-    这个判据比数关键词稳，因为它直接读的是用户写下的字。
+    判据：先在全句里取"占…的比例|占比|比重|率"的分母陈述，
+    看它是否**包含其它指标的 label**。包含 → 用户在指名要那一列，不能剪。
+
+    例外：分母里出现的是该比率指标**自己的组成项**（分子/分母指标），
+    那是"这个率怎么算"的解释，不是追加输出列——B6 的"全部订单数"
+    就是 refund_rate 的 denominator，剪掉它才得到 ["地区", "退款率"]。
     """
-    idx = question.find(label)
-    if idx < 0:
+    if label not in question:
         return False
-    before = question[max(0, idx - 30): idx]
-    if "占" not in before:
+    match = _INSIDE_RATIO_RE.search(question)
+    if match is None:
         return False
-    # 取分母陈述：从"占"到"的比例"/"率"
-    start = question.rfind("占", 0, idx)
-    tail = question[idx: idx + 20]
-    end_marker = min(
-        [p for p in (tail.find("比例"), tail.find("率是多少"),
-                     tail.find("率多少")) if p >= 0] or [len(tail)]
+    denominator = match.group(0)
+
+    # 该比率指标自身的组成项：出现在分母里只是解释算法，不算点名
+    own: set[str] = set()
+    ratio_name = next(
+        (n for n, mt in model.metrics.items() if (mt.label or n) == label),
+        None,
     )
-    denominator = question[start + 1: idx + end_marker]
-    for other in model.metrics:
-        if other == label:
+    if ratio_name is not None:
+        own = set(metric_refs(model.metrics[ratio_name].expr))
+
+    # 长 label 先消费，避免短标签误撞长标签：
+    # "各有多少笔"会注册 label="订单数" 的条件聚合指标，而 B6 的分母里
+    # 是"全部订单数"——按子串直接判会把 B6 从 2 列变成 3 列，
+    # 且是否发生取决于这之前有没有问过"各有多少笔"（顺序依赖的坑）。
+    text = denominator
+    for other in sorted(
+        model.metrics,
+        key=lambda n: -len(model.metrics[n].label or n),
+    ):
+        mt = model.metrics[other]
+        other_label = mt.label or other
+        if not other_label or other_label == label:
             continue
-        other_label = model.metrics[other].label or other
-        if other_label and other_label in denominator:
-            return False        # 分母被点名 → 列举型
+        if other_label not in text:
+            continue
+        if other in own:
+            text = text.replace(other_label, " ")   # 解释性组成项：消费掉
+            continue
+        return False        # 分母被点名 → 列举型
     return True
 
 

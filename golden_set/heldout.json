@@ -1,0 +1,768 @@
+{
+  "version": "m3-heldout-v1",
+  "note": "留出集：M3 实现完成后才写，开发期不跑。答案由手写 SQL 执行得到，与 baseline.json 同一产线。M4 实验使用，用于检验语义层改动是否只对黄金集过拟合。",
+  "db": "golden_set/ecommerce.db",
+  "semantics": "golden_set/metrics.yml",
+  "cases": [
+    {
+      "id": "H1",
+      "category": "基础过滤与聚合",
+      "question": "2024年5月，家电品类的实收金额和有效订单数分别是多少？",
+      "sql": "SELECT ROUND(SUM(f.amount - f.discount_amount), 2) AS 实收金额,\n       COUNT(*) AS 有效订单数\nFROM fact_order f\nJOIN dim_product p ON f.product_id = p.product_id\nWHERE p.category = '家电' AND f.order_status = '已支付'\n  AND f.order_date >= '2024-05-01' AND f.order_date <= '2024-05-31'",
+      "columns": [
+        "实收金额",
+        "有效订单数"
+      ],
+      "row_count": 1,
+      "rows": [
+        [
+          49894.65,
+          23
+        ]
+      ]
+    },
+    {
+      "id": "H2",
+      "category": "基础过滤与聚合",
+      "question": "2024年上半年，华北地区的已取消订单有多少笔？",
+      "sql": "SELECT COUNT(*) AS 已取消订单数\nFROM fact_order f\nJOIN dim_customer c ON f.customer_id = c.customer_id\nWHERE c.region = '华北' AND f.order_status = '已取消' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'",
+      "columns": [
+        "已取消订单数"
+      ],
+      "row_count": 1,
+      "rows": [
+        [
+          17
+        ]
+      ]
+    },
+    {
+      "id": "H3",
+      "category": "基础过滤与聚合",
+      "question": "2024年6月，实收金额超过1000元的有效订单有多少笔？",
+      "sql": "SELECT COUNT(*) AS 订单数\nFROM fact_order f\nWHERE f.order_status = '已支付'\n  AND (f.amount - f.discount_amount) > 1000\n  AND f.order_date >= '2024-06-01' AND f.order_date <= '2024-06-30'",
+      "columns": [
+        "订单数"
+      ],
+      "row_count": 1,
+      "rows": [
+        [
+          40
+        ]
+      ]
+    },
+    {
+      "id": "H4",
+      "category": "基础过滤与聚合",
+      "question": "2024年上半年，食品品类的销量合计是多少？",
+      "sql": "SELECT SUM(f.quantity) AS 销量\nFROM fact_order f\nJOIN dim_product p ON f.product_id = p.product_id\nWHERE p.category = '食品' AND f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'",
+      "columns": [
+        "销量"
+      ],
+      "row_count": 1,
+      "rows": [
+        [
+          223
+        ]
+      ]
+    },
+    {
+      "id": "H5",
+      "category": "分组聚合",
+      "question": "2024年上半年，各客户等级的有效订单数是多少？按订单数降序排列。",
+      "sql": "SELECT c.customer_level AS 客户等级, COUNT(*) AS 有效订单数\nFROM fact_order f\nJOIN dim_customer c ON f.customer_id = c.customer_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY c.customer_level\nORDER BY 有效订单数 DESC, 客户等级",
+      "columns": [
+        "客户等级",
+        "有效订单数"
+      ],
+      "row_count": 4,
+      "rows": [
+        [
+          "普通",
+          229
+        ],
+        [
+          "白银",
+          168
+        ],
+        [
+          "黄金",
+          163
+        ],
+        [
+          "铂金",
+          101
+        ]
+      ]
+    },
+    {
+      "id": "H6",
+      "category": "分组聚合",
+      "question": "2024年上半年，各品牌的平均单笔实收金额是多少？按平均金额降序排列。",
+      "sql": "SELECT p.brand AS 品牌,\n       ROUND(AVG(f.amount - f.discount_amount), 2) AS 平均金额\nFROM fact_order f\nJOIN dim_product p ON f.product_id = p.product_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY p.brand\nORDER BY 平均金额 DESC, 品牌",
+      "columns": [
+        "品牌",
+        "平均金额"
+      ],
+      "row_count": 13,
+      "rows": [
+        [
+          "星辰",
+          4567.79
+        ],
+        [
+          "洁宝",
+          2821.07
+        ],
+        [
+          "视界",
+          2514.39
+        ],
+        [
+          "云裳",
+          1140.92
+        ],
+        [
+          "疾风",
+          995.28
+        ],
+        [
+          "黑轴",
+          732.34
+        ],
+        [
+          "厨乐",
+          680.36
+        ],
+        [
+          "风行",
+          591.84
+        ],
+        [
+          "烘焙家",
+          378.16
+        ],
+        [
+          "山野",
+          347.28
+        ],
+        [
+          "华章",
+          257.06
+        ],
+        [
+          "博文",
+          184.35
+        ],
+        [
+          "牧场",
+          176.67
+        ]
+      ]
+    },
+    {
+      "id": "H7",
+      "category": "分组聚合",
+      "question": "2024年上半年，各渠道的退款订单数是多少？",
+      "sql": "SELECT c.channel_name AS 渠道, COUNT(*) AS 退款订单数\nFROM fact_order f\nJOIN dim_channel c ON f.channel_id = c.channel_id\nWHERE f.order_status = '已退款' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY c.channel_name\nORDER BY 退款订单数 DESC, 渠道",
+      "columns": [
+        "渠道",
+        "退款订单数"
+      ],
+      "row_count": 5,
+      "rows": [
+        [
+          "京东",
+          18
+        ],
+        [
+          "官网",
+          18
+        ],
+        [
+          "淘宝",
+          17
+        ],
+        [
+          "线下门店",
+          12
+        ],
+        [
+          "抖音",
+          8
+        ]
+      ]
+    },
+    {
+      "id": "H8",
+      "category": "分组聚合",
+      "question": "2024年上半年，下单次数超过5次的客户有哪些？列出客户姓名和订单数。",
+      "sql": "SELECT c.customer_name AS 客户姓名, COUNT(*) AS 订单数\nFROM fact_order f\nJOIN dim_customer c ON f.customer_id = c.customer_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY c.customer_id, c.customer_name\nHAVING COUNT(*) > 5\nORDER BY 订单数 DESC, 客户姓名",
+      "columns": [
+        "客户姓名",
+        "订单数"
+      ],
+      "row_count": 12,
+      "rows": [
+        [
+          "冯超",
+          60
+        ],
+        [
+          "刘洋",
+          59
+        ],
+        [
+          "周婷",
+          58
+        ],
+        [
+          "杨帆",
+          58
+        ],
+        [
+          "郑爽",
+          58
+        ],
+        [
+          "张伟",
+          56
+        ],
+        [
+          "吴昊",
+          55
+        ],
+        [
+          "赵敏",
+          55
+        ],
+        [
+          "李娜",
+          52
+        ],
+        [
+          "王强",
+          52
+        ],
+        [
+          "孙磊",
+          49
+        ],
+        [
+          "陈静",
+          49
+        ]
+      ]
+    },
+    {
+      "id": "H9",
+      "category": "时间趋势",
+      "question": "2024年上半年，每月的已退款订单数是多少？按月份升序排列。",
+      "sql": "SELECT substr(f.order_date, 1, 7) AS 月份, COUNT(*) AS 退款订单数\nFROM fact_order f\nWHERE f.order_status = '已退款'\n  AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY substr(f.order_date, 1, 7)\nORDER BY 月份",
+      "columns": [
+        "月份",
+        "退款订单数"
+      ],
+      "row_count": 6,
+      "rows": [
+        [
+          "2024-01",
+          8
+        ],
+        [
+          "2024-02",
+          15
+        ],
+        [
+          "2024-03",
+          20
+        ],
+        [
+          "2024-04",
+          9
+        ],
+        [
+          "2024-05",
+          11
+        ],
+        [
+          "2024-06",
+          10
+        ]
+      ]
+    },
+    {
+      "id": "H10",
+      "category": "时间趋势",
+      "question": "2024年第二季度，每月的实收金额是多少？按月份升序排列。",
+      "sql": "SELECT substr(f.order_date, 1, 7) AS 月份,\n       ROUND(SUM(f.amount - f.discount_amount), 2) AS 实收金额\nFROM fact_order f\nWHERE f.order_status = '已支付'\n  AND f.order_date >= '2024-04-01' AND f.order_date <= '2024-06-30'\nGROUP BY substr(f.order_date, 1, 7)\nORDER BY 月份",
+      "columns": [
+        "月份",
+        "实收金额"
+      ],
+      "row_count": 3,
+      "rows": [
+        [
+          "2024-04",
+          162493.29
+        ],
+        [
+          "2024-05",
+          210179.88
+        ],
+        [
+          "2024-06",
+          171907.99
+        ]
+      ]
+    },
+    {
+      "id": "H11",
+      "category": "时间趋势",
+      "question": "2024年上半年，每周的实收金额是多少？按周升序排列。",
+      "sql": "SELECT strftime('%Y-%W', f.order_date) AS 年周,\n       ROUND(SUM(f.amount - f.discount_amount), 2) AS 实收金额\nFROM fact_order f\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY strftime('%Y-%W', f.order_date)\nORDER BY 年周",
+      "columns": [
+        "年周",
+        "实收金额"
+      ],
+      "row_count": 26,
+      "rows": [
+        [
+          "2024-01",
+          48770.94
+        ],
+        [
+          "2024-02",
+          36407.9
+        ],
+        [
+          "2024-03",
+          41492.48
+        ],
+        [
+          "2024-04",
+          18975.8
+        ],
+        [
+          "2024-05",
+          17680.35
+        ],
+        [
+          "2024-06",
+          62702.22
+        ],
+        [
+          "2024-07",
+          26951.79
+        ],
+        [
+          "2024-08",
+          20161.87
+        ],
+        [
+          "2024-09",
+          31443.46
+        ],
+        [
+          "2024-10",
+          25026.27
+        ],
+        [
+          "2024-11",
+          48507.07
+        ],
+        [
+          "2024-12",
+          38063.93
+        ],
+        [
+          "2024-13",
+          31226.53
+        ],
+        [
+          "2024-14",
+          30433.3
+        ],
+        [
+          "2024-15",
+          43667.02
+        ],
+        [
+          "2024-16",
+          46232.74
+        ],
+        [
+          "2024-17",
+          20164.7
+        ],
+        [
+          "2024-18",
+          87530.68
+        ],
+        [
+          "2024-19",
+          24574.9
+        ],
+        [
+          "2024-20",
+          55396.23
+        ],
+        [
+          "2024-21",
+          47824.04
+        ],
+        [
+          "2024-22",
+          33900.58
+        ],
+        [
+          "2024-23",
+          39464.43
+        ],
+        [
+          "2024-24",
+          27826.19
+        ],
+        [
+          "2024-25",
+          45585.47
+        ],
+        [
+          "2024-26",
+          41980.88
+        ]
+      ]
+    },
+    {
+      "id": "H12",
+      "category": "多表关联",
+      "question": "2024年上半年，各地区的消费客户数是多少？按客户数降序排列。",
+      "sql": "SELECT c.region AS 地区, COUNT(DISTINCT f.customer_id) AS 消费客户数\nFROM fact_order f\nJOIN dim_customer c ON f.customer_id = c.customer_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY c.region\nORDER BY 消费客户数 DESC, 地区",
+      "columns": [
+        "地区",
+        "消费客户数"
+      ],
+      "row_count": 5,
+      "rows": [
+        [
+          "华东",
+          4
+        ],
+        [
+          "华中",
+          2
+        ],
+        [
+          "华北",
+          2
+        ],
+        [
+          "华南",
+          2
+        ],
+        [
+          "西南",
+          2
+        ]
+      ]
+    },
+    {
+      "id": "H13",
+      "category": "多表关联",
+      "question": "2024年上半年，各商品品类的商品成本合计是多少？按成本降序排列。",
+      "sql": "SELECT p.category AS 品类,\n       ROUND(SUM(f.quantity * p.unit_cost), 2) AS 成本\nFROM fact_order f\nJOIN dim_product p ON f.product_id = p.product_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY p.category\nORDER BY 成本 DESC, 品类",
+      "columns": [
+        "品类",
+        "成本"
+      ],
+      "row_count": 5,
+      "rows": [
+        [
+          "数码",
+          394060
+        ],
+        [
+          "家电",
+          196700
+        ],
+        [
+          "服饰",
+          76880
+        ],
+        [
+          "食品",
+          26244
+        ],
+        [
+          "图书",
+          17315
+        ]
+      ]
+    },
+    {
+      "id": "H14",
+      "category": "多表关联",
+      "question": "2024年上半年，各客户等级的平均订单金额（实收）是多少？",
+      "sql": "SELECT c.customer_level AS 客户等级,\n       ROUND(AVG(f.amount - f.discount_amount), 2) AS 平均订单金额\nFROM fact_order f\nJOIN dim_customer c ON f.customer_id = c.customer_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY c.customer_level\nORDER BY 平均订单金额 DESC, 客户等级",
+      "columns": [
+        "客户等级",
+        "平均订单金额"
+      ],
+      "row_count": 4,
+      "rows": [
+        [
+          "普通",
+          1836.53
+        ],
+        [
+          "铂金",
+          1501.77
+        ],
+        [
+          "白银",
+          1350.14
+        ],
+        [
+          "黄金",
+          1183.57
+        ]
+      ]
+    },
+    {
+      "id": "H15",
+      "category": "窗口与排名",
+      "question": "2024年上半年，各客户等级的实收金额排名，列出等级、实收金额和排名。",
+      "sql": "SELECT c.customer_level AS 客户等级,\n       ROUND(SUM(f.amount - f.discount_amount), 2) AS 实收金额,\n       RANK() OVER (ORDER BY SUM(f.amount - f.discount_amount) DESC) AS 排名\nFROM fact_order f\nJOIN dim_customer c ON f.customer_id = c.customer_id\nWHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\nGROUP BY c.customer_level\nORDER BY 排名, 客户等级",
+      "columns": [
+        "客户等级",
+        "实收金额",
+        "排名"
+      ],
+      "row_count": 4,
+      "rows": [
+        [
+          "普通",
+          420566.41,
+          1
+        ],
+        [
+          "白银",
+          226824.36,
+          2
+        ],
+        [
+          "黄金",
+          192922.04,
+          3
+        ],
+        [
+          "铂金",
+          151678.96,
+          4
+        ]
+      ]
+    },
+    {
+      "id": "H16",
+      "category": "窗口与排名",
+      "question": "2024年上半年，各商品品类内部实收金额前2的品牌是哪些？列出品类、品牌、实收金额和品类内排名。",
+      "sql": "WITH brand AS (\n    SELECT p.category AS 品类, p.brand AS 品牌,\n           SUM(f.amount - f.discount_amount) AS 实收金额\n    FROM fact_order f\n    JOIN dim_product p ON f.product_id = p.product_id\n    WHERE f.order_status = '已支付' AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\n    GROUP BY p.category, p.brand\n)\nSELECT 品类, 品牌, ROUND(实收金额, 2) AS 实收金额, 品类内排名\nFROM (\n    SELECT 品类, 品牌, 实收金额,\n           ROW_NUMBER() OVER (PARTITION BY 品类\n                              ORDER BY 实收金额 DESC) AS 品类内排名\n    FROM brand\n)\nWHERE 品类内排名 <= 2\nORDER BY 品类, 品类内排名",
+      "columns": [
+        "品类",
+        "品牌",
+        "实收金额",
+        "品类内排名"
+      ],
+      "row_count": 10,
+      "rows": [
+        [
+          "图书",
+          "博文",
+          13273.25,
+          1
+        ],
+        [
+          "图书",
+          "华章",
+          10282.2,
+          2
+        ],
+        [
+          "家电",
+          "洁宝",
+          239790.53,
+          1
+        ],
+        [
+          "家电",
+          "厨乐",
+          30616.4,
+          2
+        ],
+        [
+          "数码",
+          "星辰",
+          429372.22,
+          1
+        ],
+        [
+          "数码",
+          "视界",
+          90518.14,
+          2
+        ],
+        [
+          "服饰",
+          "疾风",
+          42797.03,
+          1
+        ],
+        [
+          "服饰",
+          "云裳",
+          42214.13,
+          2
+        ],
+        [
+          "食品",
+          "烘焙家",
+          14748.06,
+          1
+        ],
+        [
+          "食品",
+          "山野",
+          12849.4,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "H17",
+      "category": "窗口与排名",
+      "question": "2024年上半年，每月实收金额占上半年总实收金额的比例是多少？按比例降序排列。",
+      "sql": "WITH m AS (\n    SELECT substr(f.order_date, 1, 7) AS 月份,\n           SUM(f.amount - f.discount_amount) AS v\n    FROM fact_order f\n    WHERE f.order_status = '已支付'\n      AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\n    GROUP BY substr(f.order_date, 1, 7)\n)\nSELECT 月份,\n       ROUND(v, 2) AS 实收金额,\n       ROUND(v * 1.0 / SUM(v) OVER (), 4) AS 占比\nFROM m\nORDER BY 占比 DESC, 月份",
+      "columns": [
+        "月份",
+        "实收金额",
+        "占比"
+      ],
+      "row_count": 6,
+      "rows": [
+        [
+          "2024-05",
+          210179.88,
+          0.2119
+        ],
+        [
+          "2024-06",
+          171907.99,
+          0.1733
+        ],
+        [
+          "2024-04",
+          162493.29,
+          0.1638
+        ],
+        [
+          "2024-03",
+          155735.02,
+          0.157
+        ],
+        [
+          "2024-01",
+          150971.9,
+          0.1522
+        ],
+        [
+          "2024-02",
+          140703.69,
+          0.1418
+        ]
+      ]
+    },
+    {
+      "id": "H18",
+      "category": "子查询与CTE",
+      "question": "2024年上半年，实收金额低于全部客户平均消费金额的客户有哪些？列出客户姓名和实收金额。",
+      "sql": "WITH cust AS (\n    SELECT c.customer_id, c.customer_name,\n           SUM(f.amount - f.discount_amount) AS 实收金额\n    FROM fact_order f\n    JOIN dim_customer c ON f.customer_id = c.customer_id\n    WHERE f.order_status = '已支付'\n      AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\n    GROUP BY c.customer_id, c.customer_name\n)\nSELECT customer_name AS 客户姓名, ROUND(实收金额, 2) AS 实收金额\nFROM cust\nWHERE 实收金额 < (SELECT AVG(实收金额) FROM cust)",
+      "columns": [
+        "客户姓名",
+        "实收金额"
+      ],
+      "row_count": 8,
+      "rows": [
+        [
+          "张伟",
+          58404.79
+        ],
+        [
+          "李娜",
+          61227.81
+        ],
+        [
+          "王强",
+          74441.27
+        ],
+        [
+          "陈静",
+          68767.54
+        ],
+        [
+          "孙磊",
+          77237.69
+        ],
+        [
+          "周婷",
+          65749.71
+        ],
+        [
+          "吴昊",
+          72034.84
+        ],
+        [
+          "郑爽",
+          69097.98
+        ]
+      ]
+    },
+    {
+      "id": "H19",
+      "category": "子查询与CTE",
+      "question": "2024年上半年，实收金额高于全部品类平均实收金额的品类有哪些？列出品类和实收金额。",
+      "sql": "WITH cat AS (\n    SELECT p.category AS 品类,\n           SUM(f.amount - f.discount_amount) AS 实收金额\n    FROM fact_order f\n    JOIN dim_product p ON f.product_id = p.product_id\n    WHERE f.order_status = '已支付'\n      AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\n    GROUP BY p.category\n)\nSELECT 品类, ROUND(实收金额, 2) AS 实收金额\nFROM cat\nWHERE 实收金额 > (SELECT AVG(实收金额) FROM cat)",
+      "columns": [
+        "品类",
+        "实收金额"
+      ],
+      "row_count": 2,
+      "rows": [
+        [
+          "家电",
+          270406.93
+        ],
+        [
+          "数码",
+          555042.76
+        ]
+      ]
+    },
+    {
+      "id": "H20",
+      "category": "子查询与CTE",
+      "question": "2024年上半年，实收金额不低于全部客户平均消费金额1.2倍的客户有哪些？列出客户姓名和实收金额。",
+      "sql": "WITH cust AS (\n    SELECT c.customer_id, c.customer_name,\n           SUM(f.amount - f.discount_amount) AS 实收金额\n    FROM fact_order f\n    JOIN dim_customer c ON f.customer_id = c.customer_id\n    WHERE f.order_status = '已支付'\n      AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'\n    GROUP BY c.customer_id, c.customer_name\n)\nSELECT customer_name AS 客户姓名, ROUND(实收金额, 2) AS 实收金额\nFROM cust\nWHERE 实收金额 >= (SELECT AVG(实收金额) * 1.2 FROM cust)",
+      "columns": [
+        "客户姓名",
+        "实收金额"
+      ],
+      "row_count": 1,
+      "rows": [
+        [
+          "冯超",
+          161826.97
+        ]
+      ]
+    }
+  ]
+}

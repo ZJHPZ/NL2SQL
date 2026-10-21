@@ -73,13 +73,22 @@ def build_model(*, order_level: bool = True, version: str = SEM_VERSION) -> Sema
             name="order_date", expr="f.order_date", description="下单日期",
             synonyms=["日期", "下单时间"],
         ),
+        # 时间粒度维度：expr 只写时间字段，截断表达式在编译期按方言生成
+        # （sqlite: strftime / mysql: DATE_FORMAT）。与 golden_set/metrics.yml
+        # 的 month/day/week 维度一一对应（test_s3b 会逐题比对）。
+        # M3 把 month/day 也从 `substr(...)` 迁到了 grain：语义文件里不再
+        # 出现方言写法，换引擎时不需要改语义层。
         "month": DimensionDefinition(
-            name="month", expr="substr(f.order_date, 1, 7)",
+            name="month", expr="f.order_date", grain="month",
             description="月份（YYYY-MM）", synonyms=["月份", "按月", "每月"],
         ),
         "day": DimensionDefinition(
-            name="day", expr="substr(f.order_date, 1, 10)",
+            name="day", expr="f.order_date", grain="day",
             description="日期（YYYY-MM-DD）", synonyms=["按天", "每日", "每天"],
+        ),
+        "week": DimensionDefinition(
+            name="week", expr="f.order_date", grain="week",
+            description="年周", synonyms=["周", "年周"],
         ),
         "status": DimensionDefinition(
             name="status", expr="f.order_status", description="订单状态",
@@ -92,7 +101,7 @@ def build_model(*, order_level: bool = True, version: str = SEM_VERSION) -> Sema
         ),
         "customer_name": DimensionDefinition(
             name="customer_name", expr="c.customer_name", table="dim_customer",
-            description="客户姓名", synonyms=["客户姓名", "客户名"],
+            description="客户姓名", synonyms=["客户姓名", "客户名", "客户"],
         ),
         "customer_level": DimensionDefinition(
             name="customer_level", expr="c.customer_level", table="dim_customer",
@@ -147,7 +156,8 @@ def build_model(*, order_level: bool = True, version: str = SEM_VERSION) -> Sema
         "net_revenue": MetricDefinition(
             name="net_revenue", label="实收金额", expr=PAID_NET,
             description="已支付订单的成交金额减去优惠金额",
-            synonyms=["销售额", "收入", "营收", "实收", "成交额", "实收额"],
+            synonyms=["销售额", "收入", "营收", "实收", "成交额", "实收额",
+                      "消费金额"],
             decimals=2,
         ),
         "gmv": MetricDefinition(
@@ -162,7 +172,7 @@ def build_model(*, order_level: bool = True, version: str = SEM_VERSION) -> Sema
             expr=("SUM(CASE WHEN {{ dimension('order_status') }} = '已支付'"
                   " THEN 1 ELSE 0 END)"),
             description="已支付订单笔数",
-            synonyms=["有效订单", "订单量", "订单数", "单量", "订单笔数", "多少笔"],
+            synonyms=["有效订单", "订单量", "订单数", "单量", "订单笔数", "多少笔", "几笔"],
         ),
         "all_order_count": MetricDefinition(
             name="all_order_count", label="全部订单数",

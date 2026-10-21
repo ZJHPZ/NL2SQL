@@ -47,6 +47,36 @@ _DIMENSION_REF = re.compile(r"\{\{\s*dimension\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\}
 _METRIC_REF = re.compile(r"\{\{\s*metric\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}")
 
 
+# ------------------------------------------------------------------ 时间粒度
+# 维度只声明 grain（"这个维度是时间字段按周截断"），**方言写法在这里决定**。
+# 语义文件因此不含任何方言函数：同一份 metrics.yml 在 SQLite / MySQL 上
+# 编译出各自正确的 SQL。把 strftime 写进 metrics.yml，MySQL 上会直接报错——
+# 而那种错误要到接第二个数据源时才暴露。
+_DIALECT_TIME_GRAINS: dict[str, dict[str, str]] = {
+    "sqlite": {
+        "day": "strftime('%Y-%m-%d', {x})",
+        # %Y-%W：周一为一周起点、00~53。与 MySQL 的 %Y-%u 口径一致，
+        # 同一个日历周在两个引擎上得到同一个字符串（M1 的跨引擎等价靠这个）。
+        "week": "strftime('%Y-%W', {x})",
+        "month": "strftime('%Y-%m', {x})",
+        "quarter": (
+            "strftime('%Y', {x}) || '-Q' || "
+            "((CAST(strftime('%m', {x}) AS INTEGER) + 2) / 3)"
+        ),
+        "year": "strftime('%Y', {x})",
+    },
+    "mysql": {
+        "day": "DATE_FORMAT({x}, '%Y-%m-%d')",
+        # %u = 周一起算、00~53，对齐 SQLite 的 %W；
+        # 换成 %v（ISO 周）会在跨年周上和 %W 差一位。
+        "week": "DATE_FORMAT({x}, '%Y-%u')",
+        "month": "DATE_FORMAT({x}, '%Y-%m')",
+        "quarter": "CONCAT(YEAR({x}), '-Q', QUARTER({x}))",
+        "year": "DATE_FORMAT({x}, '%Y')",
+    },
+}
+
+
 def expand_metric_expr(
     name: str, model: SemanticModel,
     _seen: frozenset[str] = frozenset(),
@@ -195,6 +225,8 @@ class SqlCompiler:
         if not plan.measures and not plan.dimensions and plan.pivot is None:
             raise CompileError("逻辑计划既无指标也无维度，无法生成 SQL")
 
+        if plan.compare is not None:
+            return self._compile_scalar_compare(plan, model)
         if plan.pivot is not None:
             return self._compile_pivot(plan, model)
         if plan.qualify:
@@ -215,7 +247,8 @@ class SqlCompiler:
         # 注意 SQLite/MySQL 的宽松模式虽允许按别名分组，
         # 但写法 `GROUP BY expr AS alias` 是语法错误——这是真实踩过的坑。
         dim_group_exprs = [
-            self._dimension(d, model).resolved_expr() for d in plan.dimensions
+            self._dimension_expr_sql(self._dimension(d, model))
+            for d in plan.dimensions
         ]
         dim_aliases = [(d.alias or d.dimension) for d in plan.dimensions]
         measure_sql = [self._measure_sql(pm, model) for pm in agg_measures]
@@ -423,7 +456,7 @@ class SqlCompiler:
                            for d in plan.dimensions]
                           + [self._measure_sql(m, model) for m in need_agg]),
             joins=joins, where_parts=where_parts,
-            group_by=[self._dimension(d, model).resolved_expr()
+            group_by=[self._dimension_expr_sql(self._dimension(d, model))
                       for d in plan.dimensions],
             order_by=[], limit=None, ctes=ctes,
             having_parts=self._having_sql(plan.having, model, need_join),
@@ -492,6 +525,164 @@ class SqlCompiler:
             sql=sql,
             tables_used=[base] + [j.table for j in joins],
             ctes=[c.name for c in ctes] + ["agg", "win"],
+        )
+
+    # --------------------------------------------------------- 标量比较编译
+    def _compile_scalar_compare(self, plan: LogicalPlan,
+                                model: SemanticModel) -> CompileResult:
+        """聚合结果与**另一个聚合结果**比较（"高于平均"）。
+
+        生成形状：
+
+            WITH agg AS (              -- 当前结果集：全部过滤 + 时间范围
+                SELECT 维度..., 指标 AS "指标名"
+                FROM ... WHERE ... GROUP BY 维度
+            )
+            [, base AS (...只保留时间范围...)]   -- 仅 against="all" 且还有其它过滤时
+            SELECT ... FROM agg
+            WHERE agg."指标名" > (SELECT AVG("指标名") FROM agg|base)
+
+        **为什么用子查询而不是 `AVG(...) OVER ()`**：窗口函数不能出现在
+        WHERE 里，用它就得再套一层（等于三层编译）；而这里"平均"只是
+        一个标量，子查询直接、也不会把窗口的分区/排序语义混进来。
+
+        `against` 决定分母：`all` = 整张表（只保留时间范围），
+        `result` = 当前结果集（agg 自己）。两者只在"还有额外行过滤"时
+        才不同——但那时选错就是一个安静合理的错误答案，所以契约里显式分开。
+        """
+        comp = plan.compare
+        assert comp is not None
+        if plan.pivot is not None:
+            raise CompileError("标量比较（compare）与透视（pivot）暂不支持组合使用")
+        if plan.qualify:
+            raise CompileError("标量比较（compare）与 qualify 暂不支持组合使用")
+        if not plan.measures:
+            raise CompileError("标量比较需要至少一个指标（比较的是聚合结果）")
+
+        cmp_measure = next(
+            (pm for pm in plan.measures if pm.metric == comp.measure), None)
+        if cmp_measure is None:
+            available = ", ".join(pm.metric for pm in plan.measures) or "（无）"
+            raise CompileError(
+                f"标量比较引用的指标 {comp.measure!r} 不在计划指标里；"
+                f"可用: {available}"
+            )
+        metric = self._metric(cmp_measure, model)
+        if metric.window:
+            raise CompileError(
+                f"标量比较只支持聚合指标，{comp.measure} 是窗口指标"
+                f"——窗口值没有「整表平均」的概念"
+            )
+        cmp_alias = cmp_measure.alias or cmp_measure.metric
+
+        joins: list[JoinSpec] = []
+        ctes: list[DimensionDefinition] = []
+
+        def need_join(table: str | None) -> None:
+            spec = model.join_for_table(table)
+            if spec is None:
+                if (table and table != model.base_table
+                        and table not in model.logical_tables):
+                    raise CompileError(
+                        f"表 {table} 没有对应的 join 定义"
+                        f"（在 SemanticModel.table_joins 中配置）"
+                    )
+                return
+            if all(j.name != spec.name for j in joins):
+                joins.append(spec)
+
+        for pm in plan.measures:
+            mt = self._metric(pm, model)
+            if mt.window:
+                continue
+            need_join(mt.table)
+            for dim_name in referenced_dimensions(pm.metric, model):
+                sub = model.dimensions.get(dim_name)
+                if sub is not None and not sub.select:
+                    need_join(sub.table)
+        for d in plan.dimensions:
+            dim = self._dimension(d, model)
+            if dim.select:
+                ctes.append(dim)
+            else:
+                need_join(dim.table)
+
+        def where_for(include_row_filters: bool) -> list[str]:
+            parts: list[str] = []
+            if include_row_filters:
+                for fo in plan.filters:
+                    need_join(self._filter_table(fo, model))
+                    parts.append(self._filter_sql(fo, model))
+            if plan.time_range:
+                parts.append(self._time_sql(plan.time_range, model))
+            return parts
+
+        where_parts = where_for(True)
+        having_parts = self._having_sql(plan.having, model, need_join)
+
+        base_table, base_alias = model.from_clause()
+        if not base_table:
+            raise CompileError("SemanticModel.base_table 未设置")
+
+        dim_aliases = [(d.alias or d.dimension) for d in plan.dimensions]
+        dim_select_sql = [self._dimension_sql(d, model) for d in plan.dimensions]
+        dim_group_exprs = [
+            self._dimension_expr_sql(self._dimension(d, model))
+            for d in plan.dimensions
+        ]
+        select_parts = dim_select_sql + [
+            self._measure_sql(pm, model) for pm in plan.measures
+        ]
+
+        def agg_body(where: list[str]) -> str:
+            return self._assemble(
+                base=base_table, base_alias=base_alias,
+                select_parts=select_parts, joins=joins,
+                where_parts=where, group_by=dim_group_exprs,
+                order_by=[], limit=None, ctes=[],
+                having_parts=having_parts,
+            )
+
+        cte_blocks = [
+            f"{c.name} AS (\n{self._indent(c.select or '')}\n)" for c in ctes
+        ]
+        cte_blocks.append(f"agg AS (\n{self._indent(agg_body(where_parts))}\n)")
+        cte_names = [c.name for c in ctes] + ["agg"]
+
+        avg_from = "agg"
+        if comp.against == "all" and (plan.filters or plan.having):
+            # 只有这时才需要第二份聚合：当前结果集的过滤条件不能拿来
+            # 缩"全表平均"的分母。
+            cte_blocks.append(
+                f"base AS (\n{self._indent(agg_body(where_for(False)))}\n)")
+            cte_names.append("base")
+            avg_from = "base"
+
+        threshold = f"(SELECT AVG({self._alias(cmp_alias)}) FROM {avg_from})"
+        if comp.factor != 1.0:
+            threshold = f"{threshold} * {comp.factor}"
+
+        outer_select = [f'agg.{self._alias(n)}' for n in dim_aliases]
+        for pm in plan.measures:
+            key = pm.alias or pm.metric
+            outer_select.append(f'agg.{self._alias(key)} AS {self._alias(key)}')
+        outer_where = [
+            f'agg.{self._alias(cmp_alias)} {comp.op} {threshold}'
+        ]
+        outer_order = self._outer_order_sql(
+            plan, model, dim_aliases, list(plan.measures), [],
+            {}, src="agg", window_as_expr=False,
+        )
+        outer = self._assemble(
+            base="agg", base_alias="", select_parts=outer_select, joins=[],
+            where_parts=outer_where, group_by=[], order_by=outer_order,
+            limit=plan.limit, ctes=[],
+        )
+        sql = "WITH " + ",\n".join(cte_blocks) + "\n" + outer
+        return CompileResult(
+            sql=sql,
+            tables_used=[base_table] + [j.table for j in joins],
+            ctes=cte_names,
         )
 
     # ------------------------------------------------------------ 透视编译
@@ -606,7 +797,7 @@ class SqlCompiler:
         inner = self._assemble(
             base=base, base_alias=base_alias, select_parts=inner_select,
             joins=joins, where_parts=where_parts,
-            group_by=[self._dimension(d, model).resolved_expr()
+            group_by=[self._dimension_expr_sql(self._dimension(d, model))
                       for d in plan.dimensions] + [bucket_case],
             order_by=[], limit=None, ctes=ctes,
         )
@@ -690,7 +881,7 @@ class SqlCompiler:
         agg_measures = needed
 
         dim_select_sql = [
-            f"{self._dimension(dm, model).resolved_expr()}"
+            f"{self._dimension_expr_sql(self._dimension(dm, model))}"
             f" AS {self._alias(dm.alias or dm.dimension)}"
             for dm in plan.dimensions
         ]
@@ -849,7 +1040,7 @@ class SqlCompiler:
             metric = model.metrics.get(h.field)
             if dim is not None:
                 need_join(dim.table)
-                lhs = dim.resolved_expr()
+                lhs = self._dimension_expr_sql(dim)
             elif metric is not None:
                 need_join(metric.table)
                 for dim_name in referenced_dimensions(h.field, model):
@@ -897,7 +1088,43 @@ class SqlCompiler:
 
     def _dimension_sql(self, d: PlanDimension, model: SemanticModel) -> str:
         dim = self._dimension(d, model)
-        return f"{dim.resolved_expr()} AS {self._alias(d.alias or d.dimension)}"
+        return (f"{self._dimension_expr_sql(dim)}"
+                f" AS {self._alias(d.alias or d.dimension)}")
+
+    def _dimension_expr_sql(self, dim: DimensionDefinition) -> str:
+        """维度的 SQL 表达式。
+
+        * 普通维度：`expr`（或 `select` 逃逸通道的列引用）原样使用
+        * 时间粒度维度（grain 非空）：`expr` 是**时间字段**，
+          按当前数据源方言展开成截断表达式（strftime / DATE_FORMAT ...）
+
+        粒度维度必须走这一个出口，而不是让各处直接 `resolved_expr()`：
+        SELECT、GROUP BY、ORDER BY、HAVING、WHERE 里只要有一处漏展开，
+        就会出现"按年周分组、但排序按原始日期"这类错位——
+        而且两处用的都是同一个维度名，看起来完全正常。
+        """
+        if not dim.grain:
+            return dim.resolved_expr()
+        if dim.select:
+            raise CompileError(
+                f"维度 {dim.name} 同时声明了 grain 和 select：粒度要按方言"
+                f"展开时间字段，而 select 是一整段 SQL，无法再插入方言函数"
+            )
+        dialect = (self._cap.dialect or "").strip().lower()
+        by_dialect = _DIALECT_TIME_GRAINS.get(dialect)
+        if by_dialect is None:
+            raise CompileError(
+                f"时间粒度维度 {dim.name}（grain={dim.grain}）需要方言支持，"
+                f"当前方言 {self._cap.dialect!r} 没有时间截断映射；"
+                f"已支持: {', '.join(sorted(_DIALECT_TIME_GRAINS))}"
+            )
+        template = by_dialect.get(dim.grain)
+        if template is None:
+            raise CompileError(
+                f"维度 {dim.name} 声明了未知粒度 {dim.grain!r}；"
+                f"{dialect} 支持: {', '.join(sorted(by_dialect))}"
+            )
+        return template.format(x=dim.resolved_expr())
 
     def _filter_table(self, f: Filter, model: SemanticModel) -> str | None:
         """过滤字段可能是指标（如 order_status 在事实表）或维度。"""
@@ -913,7 +1140,7 @@ class SqlCompiler:
     def _filter_sql(self, f: Filter, model: SemanticModel) -> str:
         dim = model.dimensions.get(f.field)
         if dim is not None:
-            lhs = dim.resolved_expr()
+            lhs = self._dimension_expr_sql(dim)
         elif f.field in model.metrics:
             lhs = expand_metric_expr(f.field, model)
         else:
@@ -988,7 +1215,7 @@ class SqlCompiler:
                 dim = model.dimensions[name]
                 if need_join is not None:
                     need_join(dim.table)
-                out.append(f"{dim.resolved_expr()} {direction}")
+                out.append(f"{self._dimension_expr_sql(dim)} {direction}")
             else:
                 out.append(f"{expand_metric_expr(name, model)} {direction}")
         return out

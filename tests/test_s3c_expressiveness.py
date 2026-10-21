@@ -227,7 +227,7 @@ def test_pivot() -> None:
                     measure=PlanMeasure("net_revenue", "实收金额")),
                 order_by=(OrderBy("月份", False),))
     sql2 = comp.compile(plan2, model).sql
-    check("GROUP BY substr(f.order_date, 1, 7)" in sql2,
+    check("GROUP BY strftime('%Y-%m', f.order_date)" in sql2,
           "外层只按分组维度聚合（被转列的维度不在 GROUP BY 里）",
           sql2.split("GROUP BY")[-1][:60])
     rows2 = _rows(sql2)
@@ -343,22 +343,18 @@ def test_window() -> None:
 
 # --------------------------------------------------------------------- E
 def test_plans_converted() -> None:
-    section("[E] 逃生通道收窄：raw_select 从 9 题降到 2 题")
+    section("[E] 逃生通道清零：raw_select 从 9 题降到 0 题")
     s = summary()
-    check(s["semantic"] >= 28,
-          f"★ {s['semantic']}/30 题用真实语义计划表达（原 21）", str(s))
-    check(s["raw_select"] <= 2,
-          f"★ 只剩 {s['raw_select']} 题走逃生通道", str(s["raw_select"]))
+    check(s["semantic"] == 30,
+          "★ 30/30 题用真实语义计划表达（S3c 后 28，M3 后 30）", str(s))
+    check(s["raw_select"] == 0,
+          f"★ 没有题再走逃生通道（raw_select={s['raw_select']}）", str(s))
     raw_ids = sorted(k for k, v in PLANS.items() if v.raw_select)
-    check(raw_ids == ["C3", "F1"],
-          "★ 剩下的两题是**别的能力缺口**，而且被明确留在逃生通道",
-          str(raw_ids))
-    print("     C3 = 按 ISO 周分桶（需要方言函数，属于方言细节，"
-          "放进可移植的指标文件反而是倒退）")
-    print("     F1 = 与全局平均值的标量子查询比较（比较的右边是一个聚合结果，"
-          "当前 qualify 只支持字面量）")
+    check(raw_ids == [], "★ raw_select 通道保留但黄金集已无使用者", str(raw_ids))
+    print("     C3 = 计划只说 grain=week，方言层各自展开（M3）")
+    print("     F1 = ScalarCompare：与另一个聚合结果比较（M3）")
 
-    # 四个新能力都在计划里被真的用上了
+    # 各构造都在计划里被真的用上了
     kinds = set()
     for p in PLANS.values():
         if p.having:
@@ -367,12 +363,16 @@ def test_plans_converted() -> None:
             kinds.add("qualify")
         if p.pivot:
             kinds.add("pivot")
+        if p.compare:
+            kinds.add("compare")
         if any("cumulative" in m.metric for m in p.measures):
             kinds.add("cumulative")
         if any("rank" in m.metric for m in p.measures):
             kinds.add("rank")
-    check(kinds == {"having", "qualify", "pivot", "cumulative", "rank"},
-          "★ 五种新构造都在黄金计划里被使用（不是只写了代码）", str(sorted(kinds)))
+    check(kinds == {"having", "qualify", "pivot", "compare",
+                    "cumulative", "rank"},
+          "★ 六种新构造都在黄金计划里被使用（不是只写了代码）",
+          str(sorted(kinds)))
 
 
 # --------------------------------------------------------------------- F

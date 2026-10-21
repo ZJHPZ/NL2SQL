@@ -91,8 +91,8 @@ dbt 的规范里**确实没有**一些东西，我们变不出来：
 
 * **标注类**（`synonyms` / `decimals` / `ratio`）：只影响怎么匹配问句和
   怎么格式化数字，**SQL 口径不变**，拿回 dbt 结果数字仍然对
-* **结构类**（`window` / `select` / `table` / `logical_*`）：**dbt 里没有等价物**，
-  拿回 dbt 就跑不出同样的数
+* **结构类**（`window` / `select` / `table` / `logical_*` / `grain`）：**dbt 里没有
+  等价物**，拿回 dbt 就跑不出同样的数
 
 报告里这两类是分开计数的。诚实地说"这份文件有多少能拿回 dbt 跑"，
 比声称 100% 兼容有价值。
@@ -117,6 +117,10 @@ EXTENSION_KEY = "nl2sql"
 
 # 只影响匹配与格式化、不影响 SQL 口径的扩展键
 _ANNOTATION_KEYS = frozenset({"synonyms", "decimals", "ratio"})
+
+# 维度可声明的时间粒度：语义文件只写"周桶"，截断表达式由编译器按方言展开。
+# 与 dbt 指标上的 time_grains 不是一回事——后者只用于时间筛选，不产出列。
+_TIME_GRAINS = frozenset({"day", "week", "month", "quarter", "year"})
 
 # dbt legacy 的 calculation_method → SQL 聚合函数
 _LEGACY_AGG: dict[str, str] = {
@@ -1014,6 +1018,24 @@ class DbtMetricsLoader:
             expr_final = _qualify_columns(expr, table.column_names, alias)
             expr_final = _normalize_sql_ws(expr_final)
 
+        # 时间粒度：声明"这个维度是 expr 所指时间字段的 day/week/month/... 桶"。
+        # dbt 没有等价物（它的时间粒度挂在指标 time_grains 上），所以属于结构扩展。
+        # 只存语义（grain + 时间字段），不存方言写法——展开由编译器按数据源做。
+        grain = ext.get("grain")
+        if grain is not None:
+            grain = str(grain).strip().lower()
+            if grain not in _TIME_GRAINS:
+                raise DbtMetricsError(
+                    f"{where}[{name}].meta.{EXTENSION_KEY}.grain: "
+                    f"只能是 {'/'.join(sorted(_TIME_GRAINS))}，得到 {grain!r}"
+                )
+            if select:
+                raise DbtMetricsError(
+                    f"{where}[{name}].meta.{EXTENSION_KEY}.grain: "
+                    "粒度维度不能用 select 逃逸——编译期要按方言展开时间字段，"
+                    "而 select 是整段 SQL，无法再插入方言函数"
+                )
+
         return DimensionDefinition(
             name=name,
             expr=expr_final,
@@ -1022,6 +1044,7 @@ class DbtMetricsLoader:
             alias=str(ext["select_alias"]) if ext.get("select_alias") else None,
             description=str(d.get("description") or ""),
             synonyms=[str(x) for x in _as_list(ext.get("synonyms"))],
+            grain=grain,
         )
 
     # ------------------------------------------------------------ JOIN

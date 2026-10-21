@@ -67,6 +67,45 @@ class Having:
 
 
 @dataclass(frozen=True)
+class ScalarCompare:
+    """把聚合结果与**另一个聚合结果**比较（而不是与常量比较）。
+
+    典型问法："消费金额高于全部客户平均消费金额的客户有哪些"。
+    它既不是 `Filter`（作用和值都是行级常量），也不是 `Having`
+    （阈值仍是常量）：先要算出每个客户的聚合，再拿这份聚合
+    与"整张表 / 当前结果集的平均"比。
+
+    `against` 决定平均在哪个集合上算——**这是两个不同的问题，答案也不同**：
+    * "all"    整张表：只保留时间范围，忽略其它行过滤
+               （"高于全部客户平均"）
+    * "result" 当前结果集：即本计划 WHERE 之后、HAVING 之前的那份聚合
+               （"高于本组平均"）
+
+    不把两者合成一个"平均"是刻意的：选错了不会报错，只会安安静静地
+    返回一组看起来合理的客户。分叉必须显式出现在契约里。
+    """
+
+    measure: str                 # 指标名，必须出现在 plan.measures 里
+    against: str = "all"         # "all" | "result"
+    op: str = ">"                # ">" ">=" "<" "<="
+    factor: float = 1.0          # 阈值系数：factor=1.2 表示 "> 1.2 × 平均"
+
+    def __post_init__(self) -> None:
+        if self.against not in ("all", "result"):
+            raise ValueError(
+                f"ScalarCompare.against 只能是 all/result，得到 {self.against!r}"
+            )
+        if self.op not in (">", ">=", "<", "<="):
+            raise ValueError(
+                f"ScalarCompare.op 只支持 > >= < <=，得到 {self.op!r}"
+            )
+        if not isinstance(self.factor, (int, float)) or self.factor <= 0:
+            raise ValueError(
+                f"ScalarCompare.factor 必须是正数，得到 {self.factor!r}"
+            )
+
+
+@dataclass(frozen=True)
 class PivotBucket:
     """透视表的一列：一组条件 + 输出列名。
 
@@ -158,6 +197,14 @@ class LogicalPlan:
     pivot: Pivot | None = None
     """把一个维度的取值转成列（跨期对比 / 分类转列）。"""
 
+    compare: ScalarCompare | None = None
+    """聚合结果之上的标量比较（"高于平均"）。见 `ScalarCompare`。
+
+    `measure` 必须已经在 `measures` 里；编译器会把它编译成
+    "聚合 CTE + 外层 WHERE 聚合值 > (SELECT AVG(聚合值) ...)"。
+    与 `having` 的区别：`having` 比的是常量，`compare` 比的是另一个聚合。
+    """
+
     # 逃生通道：整条 SELECT 由外部提供（仍走 guard / cache / 结果比对）。
     # 用途：多步归因、与全局平均值的标量子查询比较等语义层不该内建的复杂查询。
     # 有它，语义层不必为了覆盖率而膨胀成一个 SQL 生成器。
@@ -213,6 +260,17 @@ class LogicalPlan:
                     ),
                 }
                 if self.pivot else None
+            ),
+            # 标量比较同样改变结果集，必须进指纹：否则"高于平均"与
+            # "不高于平均"共用一份缓存，只差一个 op 却拿到同一个答案。
+            "compare": (
+                {
+                    "measure": self.compare.measure,
+                    "against": self.compare.against,
+                    "op": self.compare.op,
+                    "factor": self.compare.factor,
+                }
+                if self.compare else None
             ),
             "raw_select": self.raw_select,
         }
@@ -280,6 +338,12 @@ class DimensionDefinition:
     alias: str | None = None          # select 的产出列名，默认与 name 相同
     description: str = ""
     synonyms: list[str] = field(default_factory=list)
+    # 时间粒度（day/week/month/quarter/year，None = 普通维度）。
+    # 设置时 `expr` 被解释为**时间字段**，编译期按数据源方言展开成
+    # 该粒度的截断表达式：sqlite 用 strftime、mysql 用 DATE_FORMAT。
+    # 这样做的好处是语义模型本身不含方言——同一份 metrics.yml
+    # 在两个引擎上给出同一列、同一组合，而不是各写一个 substr。
+    grain: str | None = None
 
     def resolved_expr(self) -> str:
         if self.select:

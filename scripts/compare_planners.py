@@ -118,6 +118,21 @@ def main() -> int:
         n = sum(results[p].values())
         print(f"{p:<12} {n}/{total} = {n / total:.1%}")
 
+    # 分类别准确率：总分相同不代表能力相同（语义层改动常常一类涨、一类跌）。
+    cats: dict[str, list[str]] = {}
+    for c in cases:
+        cats.setdefault(c.get("category", "未分类"), []).append(c["id"])
+    print("\n分类别：")
+    header = f"{'类别':<14}" + "".join(f"{p:>12}" for p in want)
+    print(header)
+    print("-" * len(header))
+    for cat, cat_ids in cats.items():
+        line = f"{cat:<14}"
+        for p in want:
+            hit = sum(1 for i in cat_ids if results[p].get(i))
+            line += f"{hit:>6}/{len(cat_ids):<5}"
+        print(line)
+
     if "rule" in results and "llm" in results:
         rule, llm = results["rule"], results["llm"]
         union = [i for i in ids if rule[i] or llm[i]]

@@ -8,9 +8,9 @@
 写法约定
 --------
 * 能用品语义表达的题 → 用 `measures` / `dimensions` / `filters`（真实路径）
-* 语义层不该内建的复杂查询（跨期对比、按天+HAVING、累计、占比、
-  窗口排名、子查询比较）→ 用 `raw_select` 逃生通道，但**仍走
-  guard / cache / 结果比对**，因此链路同样被验证
+* M3 之后 30 题**全部**走真实语义计划：跨期对比（pivot）、HAVING、累计/
+  占比/排名（窗口指标）、标量比较（compare）都进了契约。`raw_select` 逃生
+  通道仍然保留（且仍走 guard / cache / 结果比对），但黄金集里已无使用者。
 * 过滤用 `filters`，时间范围用 `time_range`（支持相对锚定）
 
 每题的 `expected_id` 对应 `golden_set/baseline.json` 中的题号。
@@ -26,6 +26,7 @@ from ..contracts.semantic import (
     PivotBucket,
     PlanDimension,
     PlanMeasure,
+    ScalarCompare,
     TimeRange,
 )
 
@@ -192,15 +193,17 @@ PLANS: dict[str, LogicalPlan] = {
         time_range=half_year("month"),
         order_by=[o("月份", desc=False)],
     ),
-    "C3": raw("""
-SELECT strftime('%Y-%W', order_date) AS 年周,
-       COUNT(*) AS 有效订单数
-FROM fact_order
-WHERE order_status = '已支付'
-  AND order_date >= '2024-01-01' AND order_date <= '2024-06-30'
-GROUP BY strftime('%Y-%W', order_date)
-ORDER BY 年周
-""".strip(), notes=("按 ISO 周分桶需要方言函数 strftime，属于方言细节",)),
+    # M3 之后这里不再用 raw_select：计划只说"按周"，截断表达式由
+    # 编译器按数据源方言展开（sqlite: strftime('%Y-%W') / mysql:
+    # DATE_FORMAT('%Y-%u')）。同一个计划因此在两个引擎上都能跑。
+    "C3": LogicalPlan(
+        source_id=SOURCE_ID, sem_version=SEM,
+        measures=(m("paid_order_count", "有效订单数"),),
+        dimensions=(d("week", "年周"),),
+        time_range=half_year("week"),
+        order_by=(o("年周", desc=False),),
+        notes=("时间粒度是语义层的 grain，计划里不出现方言函数",),
+    ),
     "C4": pivot_plan(
         # 跨期对比 → 透视（桶 = 两个时间段）。
         # 两个时间窗是**问题给的**，不是语义模型给的，所以做成计划的一部分
@@ -325,22 +328,18 @@ ORDER BY 年周
     ),
 
     # ---------------- F. 子查询与 CTE ----------------
-    "F1": raw("""
-WITH cust AS (
-    SELECT c.customer_id, c.customer_name,
-           SUM(f.amount - f.discount_amount) AS 实收金额
-    FROM fact_order f
-    JOIN dim_customer c ON f.customer_id = c.customer_id
-    WHERE f.order_status = '已支付'
-      AND f.order_date >= '2024-01-01' AND f.order_date <= '2024-06-30'
-    GROUP BY c.customer_id, c.customer_name
-)
-SELECT customer_name AS 客户姓名,
-       ROUND(实收金额, 2) AS 实收金额
-FROM cust
-WHERE 实收金额 > (SELECT AVG(实收金额) FROM cust)
-ORDER BY 实收金额 DESC, 客户姓名
-""".strip(), notes=("与平均值比较需要标量子查询，暂用 raw_select",)),
+    # M3 之后这里也不再走 raw_select：与"另一个聚合结果"比较被建模成
+    # `ScalarCompare(measure, against, op, factor)`，编译器展开成
+    # "聚合 CTE + 外层 WHERE 聚合值 > (SELECT AVG(...) FROM agg)"。
+    "F1": LogicalPlan(
+        source_id=SOURCE_ID, sem_version=SEM,
+        measures=(m("net_revenue", "实收金额"),),
+        dimensions=(d("customer_name", "客户姓名"),),
+        time_range=half_year(),
+        compare=ScalarCompare(measure="net_revenue", against="all", op=">"),
+        notes=("★ 标量比较：与「整表平均」比，不是常量（HAVING）也不是窗口值"
+               "（qualify）",),
+    ),
     "F2": plan(
         measures=[m("net_revenue", "实收金额"), m("revenue_share", "占比")],
         dimensions=[d("channel", "渠道")],

@@ -73,23 +73,45 @@ semantic_models:
         meta:
           nl2sql:
             synonyms: [日期, 下单时间]
-      # 时间粒度：`substr` 而不是 date_trunc —— 因为黄金库的 order_date 是
-      # TEXT（YYYY-MM-DD），这份表达式必须匹配真实存储类型。
-      # 真实 dbt 项目里应改用 `date_trunc('month', order_date)`。
+      # 时间粒度维度：dbt 没有"维度按粒度截断"的表达（它的时间粒度挂在指标
+      # 的 time_grains 上），所以用 meta 扩展声明"这个维度是时间字段的某个桶"。
+      # 表达式里只写时间字段，**不写 strftime / substr**——截断方式由编译器
+      # 按数据源方言展开（sqlite: strftime、mysql: DATE_FORMAT）。
+      # 这样同一份语义文件在两个引擎上得到同一列、同一组合；
+      # 写成 substr('%Y-%W') 就把语义文件和方言绑死了。
+      # 黄金库的 order_date 是 TEXT（YYYY-MM-DD），strftime / DATE_FORMAT
+      # 都能直接处理；真实 dbt 项目里列是 DATE 类型时，把截断交给引擎的
+      # date_trunc 也同样成立——语义文件不需要知道。
       - name: month
         type: categorical
-        expr: substr(order_date, 1, 7)
+        expr: order_date
         description: 月份（YYYY-MM）
         meta:
           nl2sql:
+            grain: month
             synonyms: [月份, 按月, 每月]
       - name: day
         type: categorical
-        expr: substr(order_date, 1, 10)
+        expr: order_date
         description: 日期（YYYY-MM-DD）
         meta:
           nl2sql:
+            grain: day
             synonyms: [按天, 每日, 每天]
+      # 时间粒度维度：dbt 没有"维度按粒度截断"的表达（它的时间粒度挂在指标
+      # 的 time_grains 上），所以用 meta 扩展声明"这个维度是 order_date 的
+      # 周桶"。表达式里只写时间字段，**不写 strftime**——截断方式由编译器按
+      # 数据源方言展开（sqlite: `%Y-%W`、mysql: `%Y-%u`）。
+      # 这样同一份语义文件在两个引擎上得到同一列、同一组合；
+      # 写成 substr('%Y-%W') 就把语义文件和方言绑死了。
+      - name: week
+        type: categorical
+        expr: order_date
+        description: 年周
+        meta:
+          nl2sql:
+            grain: week
+            synonyms: [周, 年周]
       - name: status
         type: categorical
         expr: order_status
@@ -199,7 +221,10 @@ semantic_models:
         description: 客户姓名
         meta:
           nl2sql:
-            synonyms: [客户姓名, 客户名]
+            # 「客户」单独成词：问句里"客户有哪些"不写"姓名"，
+            # 但匹配时该词会被更长的指标词（客户数/客户有多少）先占位，
+            # 所以不会把"有多少客户"错解析成按客户姓名分组。
+            synonyms: [客户姓名, 客户名, 客户]
       - name: customer_level
         type: categorical
         expr: customer_level
@@ -273,7 +298,7 @@ metrics:
     meta:
       nl2sql:
         decimals: 2
-        synonyms: [销售额, 收入, 营收, 实收, 成交额, 实收额]
+        synonyms: [销售额, 收入, 营收, 实收, 成交额, 实收额, 消费金额]
 
   - name: gmv
     label: GMV
@@ -305,7 +330,7 @@ metrics:
         value: "'已支付'"
     meta:
       nl2sql:
-        synonyms: [有效订单, 订单量, 订单数, 单量, 订单笔数, 多少笔]
+        synonyms: [有效订单, 订单量, 订单数, 单量, 订单笔数, 多少笔, 几笔]
 
   - name: all_order_count
     label: 全部订单数
