@@ -28,6 +28,7 @@
 | **M1** | **第二个引擎：MySQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11` |
 | **M2** | **LangGraph 执行器 + SSE 流式（两执行器等价性验收）** | ✅ 见 `docs/12` |
 | **M3** | **语义层两个原语：时间粒度 + 标量比较（黄金集 29/30）** | ✅ 见 `docs/13` |
+| **M4** | **实验：覆盖率扫描 / 口径漂移 / 消融 / 留出集（留出集 13/20）** | ✅ 见 `docs/14` |
 | S7–S9 | SDK / 多方言 / 开题后的其余引擎 | ⬜ |
 
 ### 插件与工具管理
@@ -232,8 +233,22 @@ python tests/test_s3c_expressiveness.py
 > 返回一组合理答案）。规则规划器黄金集 **25/30 → 29/30 = 96.7%**，唯一失败
 > D3 是黄金集题面与 SQL 口径不一致；顺带把 M1 的 C3 跨引擎缺口**正确**闭合
 > （`tests/test_m1_mysql.py` C 节 29+1 → **30/30**）。
-> 留出集 20 题在 `golden_set/heldout.json`（**开发期不跑**，M4 才用）。
+> 留出集 20 题在 `golden_set/heldout.json`（**开发期不跑**，M4 一次性跑完 13/20）。
 > 详见 **`docs/13-语义表达力.md`**。
+
+> **四个实验跑完**（M4，`docs/14` 有完整表格与复现命令）：
+> **① 覆盖率扫描**——语义模型按指标删减 8 档，规则规划器实测与"语义天花板"
+> 的差**恒为 0–1 题**（那 1 题是已知的 D3 口径不一致），三档 29/24/20；
+> 由此**推翻原预判**："缺覆盖时规则规划器会 `UNRESOLVED` 老实认输"是错的，
+> 中配档 6 个失败全是 `status=ok`——**失败不可见是覆盖率不足本身的性质**。
+> **② 口径漂移**——13 个常见指标，绕开语义层手写 SQL 的偏差 13/13 > 5%，
+> 中位 **22.5%**，最大 66.5 倍。**③ 消融**——缓存暖路径快 28%；知识库对规则
+> 规划器 0 差异（它不读知识库，如实记录）；守门改写 28/30 条 SQL 的 `LIMIT`
+> 但零准确率影响；窗口指标是独立能力项（去掉后 5 题必错）。
+> **④ 留出集**（开发期唯一一次）：**13/20 = 65.0%**，7 个失败全部 `status=ok`；
+> 与黄金集 96.7% 的差距说明**开发集数字不能外推**。模型档因无 Key 未跑，
+> 表里写"未跑 ≠ 通过"。曲线：`docs/assets/coverage_curve.png`；
+> 详见 **`docs/14-实验.md`**。
 
 实施中发现的问题记录在六处文档：
 - S2 两个静默失效坑（SQLite 只读 URI、FTS5 中文分词）→ `docs/02` 第 16 节
@@ -259,6 +274,12 @@ python tests/test_s3c_expressiveness.py
   永远绿）+ 三个语义层细节（`grain` 的 SELECT/GROUP BY/ORDER BY/HAVING/WHERE
   必须走同一出口、周桶 `%u` 与 `%v` 语义不同、`pivot+having/qualify` 仍未解开）
   → `docs/13` 第 2/4/7 节
+- M4 两个"预判被数据推翻"的坑：① 设计实验时以为缺覆盖会 `UNRESOLVED`，
+  实测规则规划器也大多"跑通但答案不对"（部分匹配总能落到剩余指标上）；
+  ② 留出集里"第二季度每月"退化成上半年 6 个月（季度解析缺口），
+  但 7 个失败中 6 个行数完全正确、只有数字错——**失败不可见**贯穿始终。
+  另有工程坑：本机没装 matplotlib（图用 Pillow 画）、`read_image` 在本模型
+  不可用（PNG 只能程序化校验）→ `docs/14` 第 2/5/8 节
 
 ---
 
@@ -308,12 +329,18 @@ talk-to-sql/
 │
 ├── golden_set/          黄金评测集（30 题 + 判分器）
 │   ├── metrics.yml      黄金语义模型的 **dbt 语法版本**（等价性验收物）
-│   └── heldout.json     **留出集 20 题**（M3 写完、开发期不跑，M4 实验用）
+│   └── heldout.json     **留出集 20 题**（M3 写完、M4 一次性跑 13/20、之后不再调参）
 ├── scripts/             开发工具
 │   ├── check_layers.py  层依赖检查（架构约束可执行化）
 │   ├── make_heldout.py  留出集基线生成/校验（手写 SQL 执行出答案）
+│   ├── coverage_scan.py 实验① 覆盖率扫描（三档 + 8 档曲线）
+│   ├── plot_coverage.py 覆盖率曲线（Pillow；本机无 matplotlib）
+│   ├── drift_table.py   实验② 口径漂移 13 例
+│   ├── ablation.py      实验③ 消融（缓存/知识库/守门/窗口指标）
+│   ├── heldout_eval.py  实验④ 留出集一次性评估（开发期只跑一次）
 │   └── scaffold.py      模块骨架生成
 ├── docs/                设计与边界文档
+│   ├── assets/          论文图（coverage_curve.png 等）
 │   ├── 08-技能设计草案.md  "声明式档 = SKILL.md" 的设计草案（待拍板）
 │   └── 09-参考实现-superpowers.md  技能型智能体的成熟参考实现分析
 ├── data/                运行时状态（gitignore）
@@ -391,6 +418,12 @@ python scripts/make_heldout.py --check
 # 按类别看准确率（论文实验章用；自检时 30/30，预测文件传入时按类汇总）
 python golden_set/evaluate.py --by-category
 
+# 5g) M4 四个实验（全部离线；模型档需 Key，脚本里会显式写"未跑"）
+python scripts/coverage_scan.py --plot docs/assets/coverage_curve.png  # ① 覆盖率
+python scripts/drift_table.py                                           # ② 口径漂移
+python scripts/ablation.py                                              # ③ 消融
+python scripts/heldout_eval.py                                          # ④ 留出集（只跑一次！）
+
 # 5c) 智能体真实模型验收（需 Key）
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx'
 python tests/test_t7_agent_live.py
@@ -467,6 +500,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、**判分器漂移**、只读账号与 `credential_ref`；C3 缺口由 M3 闭合（C 节 30/30） |
 | `docs/12-LangGraph执行器与等价性.md` | 单步状态机、图谱、两执行器等价性、SSE 首字节、五个"数字不对"的坑 |
 | `docs/13-语义表达力.md` | 时间粒度与标量比较、`against` 的歧义建模、共享语义模型的顺序依赖 bug、29/30 与 D3 口径说明 |
+| `docs/14-实验.md` | 覆盖率扫描（8 档曲线 + "失败不可见"）、口径漂移 13 例、消融、留出集 13/20、四张表与复现命令 |
 | `golden_set/README.md` | 评测集用法、口径约定、多方言扩展 |
 | `方案骨架.md` | 项目定位、分层骨架、决策记录、待定项 |
 | `题库分析.md` | 3,378 题题库评估：为何不能当黄金集、改用途建议 |
@@ -485,7 +519,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致**（M3 后 C 节已 30/30；D 节两端 29/30 同失败集） |
 | M2 | **已完成**：LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 outcome **逐题一致**，首字节 <1s |
 | M3 | **已完成**：语义层两个原语（时间粒度、标量比较） | 黄金集 **29/30 = 96.7%**（≥28/30）；D3 为黄金集口径不一致 |
-| M4 | 实验（覆盖率扫描、口径漂移、消融） | 四张表 + 一张曲线 |
+| M4 | **已完成**：实验（覆盖率扫描、口径漂移、消融、留出集） | 覆盖率曲线紧贴语义天花板（8 档差 0–1 题）；漂移 13/13 >5%；留出集 **13/20 = 65.0%**（如实记录，未据此调参） |
 | M5 | 体验、统计、真实试用 | ≥20 条真实问题 |
 | M6 | 成文与答辩演示 | 预答辩通过 |
 
