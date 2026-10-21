@@ -68,6 +68,32 @@ export interface SafetyInfo {
   forbid_ddl_dml: boolean
 }
 
+/** 执行器信息：同一套判断，两种调度方式。
+ *
+ * 为什么要在界面上露出：agent 模式下"你这句话是怎么被跑出来的"
+ * 直接影响可解释性。用户有权知道是自写循环还是 LangGraph 在调度。
+ */
+export interface RuntimeInfo {
+  name?: string
+  /** 请求的执行器（可能被降级成别的） */
+  requested?: string
+  /** 非空 = 发生了降级，内容是"缺什么"。必须显著提示，不能静默 */
+  note?: string
+  available?: Record<string, boolean>
+  /** 图执行器的节点与边（纯数据，界面可据此画图） */
+  graph?: {
+    name?: string
+    version?: string
+    nodes?: { name: string; label?: string }[]
+    edges?: {
+      source: string
+      target: string
+      condition?: string | null
+    }[]
+  }
+  error?: string
+}
+
 export interface InfoResponse {
   version: string
   planner_mode: string
@@ -109,6 +135,8 @@ export interface InfoResponse {
   engine_ready: boolean
   /** 启动期问题（含引擎装配失败的原因）。界面必须显示，否则用户无从下手 */
   startup_warnings: string[]
+  /** 实际生效的执行器（agent 模式才有图信息） */
+  runtime: RuntimeInfo
 }
 
 export interface ColumnInfo {

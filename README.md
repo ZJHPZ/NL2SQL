@@ -26,6 +26,7 @@
 | **P0** | **插件与工具管理（看得见 / 管得了 / 配得了）** | ✅ |
 | **P0b** | **技能机制（`SKILL.md`）：发现 / 报告 / `skill.load` / 界面第四块** | ✅ 见 `docs/08` |
 | **M1** | **第二个引擎：MySQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11` |
+| **M2** | **LangGraph 执行器 + SSE 流式（两执行器等价性验收）** | ✅ 见 `docs/12` |
 | S7–S9 | SDK / 多方言 / 开题后的其余引擎 | ⬜ |
 
 ### 插件与工具管理
@@ -216,6 +217,13 @@ python tests/test_s3c_expressiveness.py
 > `python scripts/mysql_create_ro_user.py`（建只读账号，口令随机生成并只写 `.env`）。
 > 详见 **`docs/11-MySQL适配器与跨引擎等价.md`**。
 
+> **执行器可切换**：`NL2SQL_RUNTIME=auto / loop / langgraph`（默认 `auto`，
+> 装了 langgraph 即用图执行器）。两者**行为等价**（6 个场景逐字段一致，
+> 含事件序列），界面顶栏会显示当前执行器；请求图执行器但没装时**降级并留痕**
+> （`/api/info` 的 `runtime.note` + 界面"已降级"标记），不会静默换掉。
+> 流式：`GET /api/query/stream`（SSE，首字节实测 <0.5s）。
+> 详见 **`docs/12-LangGraph执行器与等价性.md`**。
+
 实施中发现的问题记录在六处文档：
 - S2 两个静默失效坑（SQLite 只读 URI、FTS5 中文分词）→ `docs/02` 第 16 节
 - S3 编译器五个坑 → `docs/02` 第 17 节
@@ -230,6 +238,11 @@ python tests/test_s3c_expressiveness.py
 - M1 两处判分器 bug（比错列、丢 NULL）与跨引擎验收带出的其余坑
   （只读账号把 1305 掩盖成 1142、`%W` 与 `%v` 语义不同）
   → `docs/11` 第 4/6 节
+- M2 两个"代码看起来对、数字不对"的坑（LangGraph 只给**注解**为 `RunnableConfig`
+  的参数注入 config；Starlette 的 TestClient 会把 SSE 响应整个缓冲完，
+  首字节必须用真 uvicorn 量）+ 三个设计坑（`emit` 参数名与载荷撞车、
+  事件接收器不能挂在共享 core 上、空 TypedDict 状态变 None）
+  → `docs/12` 第 5 节
 
 ---
 
@@ -254,8 +267,11 @@ talk-to-sql/
 │   ├── cache/           结果缓存（逻辑计划指纹）
 │   ├── plugins/         **插件加载 + 对外稳定接口 ToolRegistry**
 │   ├── skills/          **技能加载（SKILL.md → 只读目录 + 加载报告）**
-│   ├── agent/           **AgentRuntime 工具循环**（图契约已定型；LangGraph 执行器在 M2）
-│   │   ├── runtime.py   循环、观测回灌、防打转、运行时硬约束
+│   ├── agent/           **智能体：单步状态机 + 两个执行器**
+│   │   ├── machine.py   单步状态机（决策解析、7 道护栏、结果挑选、收尾）
+│   │   ├── runtime.py   执行器 A：while 循环（等价性基准，零第三方依赖）
+│   │   ├── graph.py     执行器 B：GraphSpec → LangGraph StateGraph（通用编译器）
+│   │   ├── factory.py   按 `NL2SQL_RUNTIME` 选择，降级留痕
 │   │   └── builtin.py   9 个内置工具
 │   ├── config.py        配置（演示 pydantic-free 的显式配置）
 │   ├── registry.py      组件注册表（实例级，非全局）
@@ -343,6 +359,12 @@ python scripts/plugin_dev_trial.py             # 加第 6 节：模型是否真�
 # 5d) 跨引擎等价验收（需本机 MySQL + .env 里的凭据；A–E 节只读，不写库）
 #     F 节验证"改一个环境变量就换引擎"，D 节跑两边黄金集并逐题比对
 python tests/test_m1_mysql.py
+
+# 5e) 执行器等价验收（离线部分无需 Key）
+#     6 个脚本化场景逐字段比对"自写循环"与"LangGraph 执行器"（含事件序列）；
+#     SSE 首字节用线程内真 uvicorn 量（TestClient 会把响应缓冲完，量不出首字节）
+python tests/test_m2_langgraph.py
+python tests/test_m2_langgraph.py --require-live   # 需 Key：30 题逐题一致（未跑 ≠ 通过）
 
 # 5c) 智能体真实模型验收（需 Key）
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx'

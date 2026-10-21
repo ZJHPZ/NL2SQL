@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from .config import NL2SQLConfig
@@ -54,6 +54,8 @@ class NL2SQL:
         self.llm_provider = llm_provider
         # 实际生效的规划器模式（可能因缺少模型而降级），供壳层展示
         self.planner_mode: str = "未装配"
+        # 执行器降级说明（空 = 没有降级）。壳层把它放进启动告警。
+        self.runtime_note: str = ""
 
         # 存储装配
         self.storage: StorageBundle | None = None
@@ -313,7 +315,7 @@ class NL2SQL:
         变成"其中一个选项"。
         """
         from .agent.builtin import BuiltinDeps, build_builtin_tools
-        from .agent.runtime import AgentRuntime, RunConfig
+        from .agent.runtime import RunConfig
         from .contracts.tool import CAPABILITIES, Capability
         from .dialect import SqlCompiler
         from .plugins import ToolRegistry
@@ -420,11 +422,16 @@ class NL2SQL:
             max_repeat=self.config.agent.max_repeat,
             temperature=self.config.agent.temperature,
         )
-        self._runtime = AgentRuntime(
+        from .agent.factory import make_runtime
+
+        self._runtime, runtime_note = make_runtime(
+            self.config.agent.runtime,
             provider=provider, registry=registry, config=run_cfg,
             capabilities=granted,
             schema_brief=self._schema_brief(),
         )
+        # 降级要留痕：用户以为在跑图执行器、实际没有，是最难排查的那种沉默
+        self.runtime_note = runtime_note
         if mode == "agent":
             self.planner_mode = ("agent" if provider.available()
                                  else "rule(agent 降级：无模型)")
@@ -579,6 +586,7 @@ class NL2SQL:
         now: str | None = None,
         use_cache: bool | None = None,
         session_id: str | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> QueryOutcome:
         """自然语言 → SQL + 结果表。agent 模式下走工具循环。
 
@@ -589,6 +597,9 @@ class NL2SQL:
             use_cache: 覆盖配置中的缓存开关。
             session_id: 会话标识。**agent 模式（尤其澄清）必须传**，
                 否则下一轮接不上上下文。不传时自动生成单轮会话。
+            on_event: 进度事件回调（SSE 用）。**只对 agent 模式生效**——
+                线性管线是同步的一次性调用，没有中间状态可报。
+                回调抛异常不会影响查询。
 
         Returns:
             `QueryOutcome`。失败不抛异常，而是带 status/message/suggestions。
@@ -609,6 +620,7 @@ class NL2SQL:
             return self._run_agent(
                 question, source_id=source_cfg.source_id,
                 now=resolved_now, session_id=session_id,
+                on_event=on_event,
             )
 
         return self._agent.run(
@@ -618,7 +630,9 @@ class NL2SQL:
 
     # ------------------------------------------------------------ agent 运行
     def _run_agent(self, question: str, *, source_id: str, now: str | None,
-                   session_id: str | None) -> QueryOutcome:
+                   session_id: str | None,
+                   on_event: Callable[[dict[str, Any]], None] | None = None
+                   ) -> QueryOutcome:
         """跑一轮 agent 循环，并负责会话的读写与资源注入。"""
         import uuid
 
@@ -661,7 +675,8 @@ class NL2SQL:
 
         resources["pipeline"] = _pipeline
         outcome = self._runtime.run(question, session=session,
-                                    resources=resources)
+                                    resources=resources,
+                                    on_event=on_event)
         outcome.plan_fingerprint = outcome.plan_fingerprint or None
         if store is not None:
             try:
@@ -688,6 +703,32 @@ class NL2SQL:
         )
 
     # ------------------------------------------------------------ 只读能力
+    @property
+    def runtime_name(self) -> str:
+        """当前**实际生效**的执行器名（`loop` / `langgraph`）。"""
+        return getattr(self._runtime, "name", "") or ""
+
+    def runtime_describe(self) -> dict[str, Any]:
+        """执行器的自述：名字、要的是什么、有没有降级、图长什么样。
+
+        给界面与测试用。**降级必须能被看到**——`note` 非空就说明
+        用户要的执行器没给成。
+        """
+        rt = self._runtime
+        out: dict[str, Any] = {
+            "name": self.runtime_name,
+            "requested": self.config.agent.runtime,
+            "note": self.runtime_note,
+            "available": bool(rt is not None and rt.available()),
+        }
+        describe = getattr(rt, "describe", None)
+        if callable(describe):
+            try:
+                out["graph"] = describe()
+            except Exception:  # noqa: BLE001 - 自述失败不该影响接口
+                pass
+        return out
+
     def sources(self) -> list[str]:
         return sorted(self.config.sources)
 

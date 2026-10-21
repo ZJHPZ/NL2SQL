@@ -22,6 +22,10 @@
     NL2SQL_LLM_BASE_URL  模型端点（默认 DeepSeek）
     NL2SQL_LLM_MODEL     模型名（默认 deepseek-chat）
     NL2SQL_PLANNER       rule / llm / hybrid / hybrid_verified / agent / auto
+    NL2SQL_RUNTIME       auto / loop / langgraph
+                         智能体执行器。auto = 装了 langgraph 就用图执行器，
+                         否则用顺序执行器。**两者结果必须逐字一致**，
+                         所以换它不是"换个跑法"，而是"换个调度方式"。
     NL2SQL_PLUGINS       启用的外部插件，逗号分隔；留空 = 不加载（默认）。
                          写 `*` 表示加载 plugins/ 下全部。
     NL2SQL_METRICS       dbt metrics.yml 路径；不设则用内置参考语义模型
@@ -60,6 +64,8 @@ class ShellConfig:
     state_dir: str = "data"
     source_id: str = "default"
     planner: str = "auto"
+    # 智能体执行器：auto / loop / langgraph
+    runtime: str = "auto"
     config_path: str = "config/nl2sql.toml"
     plugins: tuple[str, ...] = ()
     # dbt metrics.yml 路径。空 = 用内置参考语义模型。
@@ -88,6 +94,7 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
         state_dir=e.get("NL2SQL_STATE_DIR", "data"),
         source_id=e.get("NL2SQL_SOURCE_ID", "default"),
         planner=e.get("NL2SQL_PLANNER", "auto"),
+        runtime=(e.get("NL2SQL_RUNTIME", "auto") or "auto").strip().lower(),
         # 运行配置文件的路径**必须可注入**：否则测试之间、以及多份部署
         # 会共用同一个文件，互相覆盖对方的停用清单与能力设置。
         config_path=e.get("NL2SQL_CONFIG", "config/nl2sql.toml"),
@@ -120,6 +127,7 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
             "NL2SQL_MYSQL_USER": e.get("NL2SQL_MYSQL_USER", ""),
             "NL2SQL_MYSQL_DATABASE": e.get("NL2SQL_MYSQL_DATABASE", ""),
             "NL2SQL_PLANNER": e.get("NL2SQL_PLANNER", ""),
+            "NL2SQL_RUNTIME": e.get("NL2SQL_RUNTIME", ""),
             "NL2SQL_CONFIG": e.get("NL2SQL_CONFIG", ""),
             "NL2SQL_PLUGINS": e.get("NL2SQL_PLUGINS", ""),
             "NL2SQL_METRICS": e.get("NL2SQL_METRICS", ""),
@@ -165,6 +173,8 @@ def build_shell_config(shell: ShellConfig) -> tuple[NL2SQLConfig, Any]:
     # 运行配置文件里的设置合并进来（文件不存在时是空设置，一切照常）
     settings = load_runtime_settings(shell.config_path)
     cfg.agent = apply_to_agent_config(cfg.agent, settings)
+    # 执行器：环境变量在配置文件之后生效（配置文件目前不管这个键）
+    cfg.agent.runtime = shell.runtime
 
     provider = build_provider(
         api_key=os.environ.get("NL2SQL_LLM_API_KEY") or None,

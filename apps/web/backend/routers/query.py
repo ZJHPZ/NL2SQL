@@ -7,10 +7,14 @@
 """
 from __future__ import annotations
 
+import json
+import queue
+import threading
 import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from nl2sql.contracts.pipeline import QueryOutcome
 
@@ -41,6 +45,86 @@ def run_query(req: QueryRequest,
         use_cache=req.use_cache, session_id=req.session_id,
     )
     return outcome_to_response(outcome, planner_mode=engine.planner_mode)
+
+
+@router.get("/query/stream")
+def query_stream(question: str, source_id: str | None = None,
+                 session_id: str | None = None, now: str | None = None,
+                 use_cache: bool = True,
+                 engine: Any = Depends(get_engine)) -> StreamingResponse:
+    """流式问答（SSE）：边跑边把步骤推给界面。
+
+    **为什么值得做**：agent 模式下一次问答要 9 秒左右（多步模型调用），
+    9 秒白屏和"第 1 秒就看到'正在查语义层'"是完全不同的体验。
+    首字节在这个实现里是**立即**发出的，不等第一次模型返回。
+
+    事件格式（`text/event-stream`）：
+        event: start     一问就开始（用于首字节）
+        event: decision  模型决定下一步（step / kind / tool）
+        event: tool      工具执行完（tool / ok / elapsed_ms / observation）
+        event: guard     护栏把模型顶回去了（rule）
+        event: clarify   agent 选择追问
+        event: result    完整结果（与 POST /api/query 的响应体同构）
+        event: done      结束
+        event: error     出错（正常失败仍走 result，这里只报运行时异常）
+
+    **为什么用线程 + 队列**：`engine.ask` 是同步的，事件在它内部同步产生。
+    生成器要"边产生边吐"，就得让查询在另一个线程跑、用队列把事件接出来。
+    代价是客户端断开后查询仍会跑完（线程是 daemon，不阻塞退出）——
+    本地单用户场景下这比"中途强行取消"简单得多，也不会留下半截状态。
+    """
+    def _frame(event: str, data: Any) -> str:
+        return (f"event: {event}\n"
+                f"data: {json.dumps(data, ensure_ascii=False, default=str)}\n\n")
+
+    def gen():
+        q: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
+        box: dict[str, Any] = {}
+
+        def worker() -> None:
+            try:
+                box["outcome"] = engine.ask(
+                    question, source_id=source_id, now=now,
+                    use_cache=use_cache, session_id=session_id,
+                    on_event=q.put,
+                )
+            except BaseException as exc:  # noqa: BLE001 - 要原样报给前端
+                box["error"] = exc
+            finally:
+                q.put(None)   # 哨兵：队列关闭
+
+        threading.Thread(target=worker, name="nl2sql-sse",
+                         daemon=True).start()
+
+        # ★ 首字节在这里，不依赖任何模型调用
+        yield _frame("start", {"question": question,
+                               "session_id": session_id})
+
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            name = str(item.get("event") or "step")
+            payload = {k: v for k, v in item.items() if k != "event"}
+            yield _frame(name, payload)
+
+        if "error" in box:
+            yield _frame("error", {"message": str(box["error"])})
+        elif isinstance(box.get("outcome"), QueryOutcome):
+            payload = outcome_to_response(
+                box["outcome"], planner_mode=engine.planner_mode)
+            yield _frame("result", payload.model_dump())
+        yield _frame("done", {})
+
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={
+            # 关掉中间层缓冲：否则"流式"要等到结束才一次性到浏览器
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/execute", response_model=QueryResponse)

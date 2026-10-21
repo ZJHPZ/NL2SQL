@@ -149,6 +149,9 @@ class InfoResponse(BaseModel):
     # 语义层来源与可移植性（用 dbt metrics.yml 时有话要说：
     # 哪些指标在 dbt 里没有等价物、有多少能拿回 dbt 跑）
     semantic: dict[str, Any] = Field(default_factory=dict)
+    # 智能体执行器：名字、要的是什么、有没有降级、图结构。
+    # 用户有权知道"这句话是我自己循环跑的，还是 LangGraph 跑的"。
+    runtime: dict[str, Any] = Field(default_factory=dict)
     # 引擎是否装配成功。**失败时 /api/info 仍然返回 200**——
     # 界面要能显示"为什么没起来"，而不是拿一个 503 干瞪眼。
     engine_ready: bool = True

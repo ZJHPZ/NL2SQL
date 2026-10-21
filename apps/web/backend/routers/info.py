@@ -114,6 +114,17 @@ def info(request: Request) -> InfoResponse:
     if engine.semantic_report is not None:
         semantic.update(engine.semantic_report.describe())
 
+    # 执行器：名字 + 有没有降级 + 图结构（节点/边）。
+    # 降级说明要进 startup_warnings —— 用户以为在跑图执行器、实际没有，
+    # 是最难排查的那种沉默。
+    runtime: dict[str, Any] = {}
+    try:
+        runtime = engine.runtime_describe()
+    except Exception as e:  # noqa: BLE001 - 自述失败不该让 /api/info 挂掉
+        runtime = {"error": str(e)}
+    if runtime.get("note"):
+        startup.append(str(runtime["note"]))
+
     return InfoResponse(
         version=__version__,
         planner_mode=engine.planner_mode,
@@ -127,6 +138,7 @@ def info(request: Request) -> InfoResponse:
         knowledge=knowledge_stats,
         snapshot=snapshot,
         semantic=semantic,
+        runtime=runtime,
         engine_ready=True,
         startup_warnings=startup,
     )

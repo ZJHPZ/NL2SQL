@@ -12,6 +12,7 @@
 
 退出码：0 通过，1 检查未通过（钩子据此中止提交）。
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,11 @@ CHECKS = [
 
 def run_one(label: str, script: str) -> bool:
     print(f"[precommit] {label} ...")
+    # 子进程的 stdout 是管道时，Windows 上 Python 按 ANSI 代码页（cp936）编码，
+    # 而这里按 utf-8 解码 → 中文变成替换字符 U+FFFD，再打印到 GBK 控制台就
+    # 抛 UnicodeEncodeError（一个检查"通过了"却让 precommit 崩掉）。
+    # 显式把子进程的输出编码钉成 utf-8，两边才对得上。
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
     result = subprocess.run(
         [sys.executable, str(ROOT / script)],
         cwd=ROOT,
@@ -34,6 +40,7 @@ def run_one(label: str, script: str) -> bool:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
     output = (result.stdout or "").strip()
     if result.returncode != 0:

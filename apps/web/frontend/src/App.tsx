@@ -24,6 +24,15 @@ import { PluginAdminPanel } from './components/PluginAdminPanel'
 
 type SideTab = 'history' | 'knowledge' | 'admin'
 
+/** 执行器的中文名。
+ * 只写"哪个调度"不够：用户要知道**这意味着什么**，
+ * 所以 title 里给出图结构或"零依赖的 while 循环"。
+ */
+const RUNTIME_LABEL: Record<string, string> = {
+  loop: '自写循环',
+  langgraph: 'LangGraph',
+}
+
 export default function App() {
   const [info, setInfo] = useState<InfoResponse | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
@@ -185,6 +194,26 @@ export default function App() {
               <span className="meta" title="实际生效的规划器">
                 规划器 <b>{info.planner_mode}</b>
               </span>
+              {info.runtime?.name && (
+                <span
+                  className="meta"
+                  title={
+                    (info.runtime.note ? `⚠ ${info.runtime.note}\n` : '')
+                    + (info.runtime.graph?.nodes?.length
+                      ? `图执行器：${info.runtime.graph.nodes
+                        .map((n) => n.name)
+                        .join(' → ')}（${info.runtime.graph.edges?.length ?? 0} 条边）`
+                      : '顺序执行器：自己写的 while 循环，零第三方依赖')
+                  }
+                >
+                  执行器{' '}
+                  <b>{RUNTIME_LABEL[info.runtime.name] ?? info.runtime.name}</b>
+                  {/* 降级必须显式标注：否则用户以为在跑图执行器 */}
+                  {info.runtime.note && (
+                    <span className="badge badge-warn"> 已降级</span>
+                  )}
+                </span>
+              )}
               <span className="meta" title={info.llm_available ? info.llm_model : '未配置 API Key'}>
                 模型 <b>{info.llm_available ? info.llm_model : '未接入'}</b>
               </span>
