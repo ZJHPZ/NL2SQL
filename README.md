@@ -417,7 +417,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 
 | 月 | 主题 | 硬验收 |
 |---|---|---|
-| M1 | 锁住底座（`git init`）+ MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致** |
+| M1 | ~~锁住底座~~（已完成：git + 单一版本号 + pre-commit）+ MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致** |
 | M2 | LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 outcome **逐题一致**，首字节 <1s |
 | M3 | 语义层两个原语（时间粒度、标量比较） | 黄金集 ≥28/30 |
 | M4 | 实验（覆盖率扫描、口径漂移、消融） | 四张表 + 一张曲线 |
