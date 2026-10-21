@@ -1,0 +1,14 @@
+#!/bin/sh
+# pre-commit 钩子：只转发给 scripts/precommit.py。
+#
+# 逻辑不写在这里，因为钩子里写逻辑就只能靠 `git commit` 触发，
+# 出了问题没法单独跑。抽成 Python 之后，手动 `python scripts/precommit.py`
+# 和提交时自动跑是同一份代码。
+#
+# 由 scripts/install_hooks.py 安装（它设置 core.hooksPath）。
+#
+# 注意：如果 git 是在受限环境里跑的（spawn 子进程被拒），钩子可能连启动都失败。
+# 那种情况下用 `git commit --no-verify` 跳过钩子，但**手动**跑一次
+# `python scripts/precommit.py` —— 跳过的是自动化，不是检查本身。
+
+exec python scripts/precommit.py

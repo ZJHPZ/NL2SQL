@@ -1,0 +1,10 @@
+# 统一用 LF 入库。Windows 上 core.autocrlf 的默认行为会让同一份文件
+# 在不同机器上产生整文件级别的 diff，掩盖真正的改动。
+* text=auto eol=lf
+
+# 二进制：不要做换行转换，也不要尝试 diff
+*.png binary
+*.jpg binary
+*.xlsx binary
+*.db binary
+*.sqlite3 binary
