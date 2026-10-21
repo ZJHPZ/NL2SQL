@@ -47,6 +47,8 @@ npm-debug.log*
 # ---- 参考材料 ----
 # 第三方范本只用于阅读对照，不是本项目代码（MIT，原仓库 obra/superpowers）
 superpowers-main/
+# LangChain 官方源码：作为「开箱即用的集成 agent」参考阅读，不并入本项目
+langchain-master/
 
 # ---- 日志 ----
 *.log

@@ -361,13 +361,24 @@ class LangGraphRuntime:
         state, rctx = core.begin(question, session=session,
                                  resources=resources, on_event=on_event)
 
-        limit = self._recursion_limit or (2 * core.config.max_steps + 5)
+        # 递归上限必须按**图节点数**推导，不能按决策步数推导：
+        # 一轮循环最多走 decide → review → act 三个节点，另外还有收尾的
+        # finish 和控制节点。曾经写成 `2 * max_steps + 5`，max_steps=8 时
+        # 上限只有 21，而 8 轮各调一次工具就要 8×3 + 2 = 26 跳——框架先于
+        # 业务步数上限报 GraphRecursionError，用户看到的是框架内部错误。
+        limit = self._recursion_limit or (3 * core.config.max_steps + 5)
         cfg = {
             "configurable": {_RCTX_KEY: rctx,
                              "thread_id": f"run-{uuid.uuid4().hex[:12]}"},
             "recursion_limit": limit,
         }
-        final_state = app.invoke(state, cfg)
+        try:
+            final_state = app.invoke(state, cfg)
+        except RecursionError:
+            # langgraph 的 GraphRecursionError 是 RecursionError 的子类。
+            # 它不是"查询失败"，而是"编排预算不足"，必须与业务失败区分开；
+            # 优雅返回也比把框架异常抛给调用方强（界面还能给出可读文案）。
+            return _recursion_exhausted(question, session, limit)
         if not isinstance(final_state, dict):  # 理论上不会，兜底不掩盖
             final_state = state
         return core.to_outcome(
@@ -388,6 +399,21 @@ class LangGraphRuntime:
                 for e in spec.edges
             ],
         }
+
+
+def _recursion_exhausted(question: str, session: SessionState,
+                         limit: int) -> QueryOutcome:
+    """编排预算耗尽：是执行器的保护，不是模型或数据的错。"""
+    return QueryOutcome(
+        status="error", question=question,
+        source_id=session.source_id, error_code="RECURSION_LIMIT",
+        message=f"智能体在 {limit} 次节点跳转内没有得出结论，已停止。",
+        suggestions=[
+            "换一种问法，或把问题拆成更小的步骤",
+            "若模型在反复调用同一工具，检查它是否理解了工具说明",
+            "增大 NL2SQL_AGENT_MAX_STEPS（默认 8）并重启",
+        ],
+    )
 
 
 def _llm_unavailable(question: str, session: SessionState) -> QueryOutcome:

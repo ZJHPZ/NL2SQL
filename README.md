@@ -26,9 +26,9 @@
 | **P0** | **插件与工具管理（看得见 / 管得了 / 配得了）** | ✅ |
 | **P0b** | **技能机制（`SKILL.md`）：发现 / 报告 / `skill.load` / 界面第四块** | ✅ 见 `docs/08` |
 | **M1** | **第二个引擎：MySQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11` |
-| **M2** | **LangGraph 执行器 + SSE 流式（两执行器等价性验收）** | ✅ 见 `docs/12` |
+| **M2** | **LangGraph 执行器 + SSE 流式（30 题录制—重放 30/30 一致）** | ✅ 见 `docs/12` |
 | **M3** | **语义层两个原语：时间粒度 + 标量比较（黄金集 29/30）** | ✅ 见 `docs/13` |
-| **M4** | **实验：覆盖率扫描 / 口径漂移 / 消融 / 留出集（留出集 13/20）** | ✅ 见 `docs/14` |
+| **M4** | **实验：覆盖率 / 口径漂移 / 消融 / 留出集（rule 13/20；llm 12/20）** | ✅ 见 `docs/14` |
 | **M5** | **观测与失败归因：统计接口 + 九态可读文案（真实试用 0/20 未开始）** | ✅ 见 `docs/15` |
 | S7–S9 | SDK / 多方言 / 开题后的其余引擎 | ⬜ |
 
@@ -93,6 +93,13 @@
 实测（真实模型）：清晰问题 3/3 都**真的查到数据**并给出正确数值；
 缺时间范围的问题**主动追问**，用户回答后跨回合正确接续。
 
+追问的边界（2026-10 打真模型后收紧，T7/T8 复跑通过）：问**指标的具体数值**
+（"销售额是多少"）却没给时间范围时，先追问时间范围、**不默认全时段**——
+时间范围不同金额能差几倍，是猜错代价最高的一类信息；比较/排名类
+（"哪个渠道表现最好"）仍用默认口径作答并披露标准；预测类
+（"预测下个季度"）明确说明无法预测，**不编造数字**。规则写死在
+`nl2sql/agent/machine.py` 的 `DECISION_PROMPT`，不靠模型临场裁量。
+
 **散文结论 + 结构化结果表同时返回**：agent 的回答是自然语言（给判断），
 同时把工具拿到的数据提升为 `QueryOutcome.result`（给可排序、可导出的明细）。
 刻意**不解析散文还原表格**——结构化数据本来就在工具返回值里，只是之前没往下传。
@@ -122,6 +129,9 @@
 
 > 上表用**内置参考模型**测得。换成 `golden_set/metrics.yml`（dbt 语法）
 > 后数字与失败题目集合完全相同，见下节。
+>
+> llm 的数字有**抽样波动**（不同次运行在 23–24/30 之间，本次 s4b 单次为
+> 24/30）：DeepSeek 在 temperature=0 下仍 run-to-run 非确定，见 `docs/14` §1.3。
 
 **知识库机制完备**（检索/版本/停用/测试检索/自动生成），但实测
 **few-shot 贡献 0 题**（留出集 7/13 → 7/13），**验证式混合不划算**。
@@ -247,8 +257,11 @@ python tests/test_s3c_expressiveness.py
 > 规划器 0 差异（它不读知识库，如实记录）；守门改写 28/30 条 SQL 的 `LIMIT`
 > 但零准确率影响；窗口指标是独立能力项（去掉后 5 题必错）。
 > **④ 留出集**（开发期唯一一次）：**13/20 = 65.0%**，7 个失败全部 `status=ok`；
-> 与黄金集 96.7% 的差距说明**开发集数字不能外推**。模型档因无 Key 未跑，
-> 表里写"未跑 ≠ 通过"。曲线：`docs/assets/coverage_curve.png`；
+> 与黄金集 96.7% 的差距说明**开发集数字不能外推**。
+> **模型（llm）档已补跑**：覆盖率三档 23/20/17（rule 29/24/20）、留出集 12/20
+> ——**换规划器没有提高上限**，反而多出 `EXEC_ERROR`/`COMPILE_FAILED` 一类
+> "没产出结果"的失败；模型输出 run-to-run 非确定（同 Prompt 两次回复可能不同），
+> 数字只作量级参考。曲线：`docs/assets/coverage_curve.png`；
 > 详见 **`docs/14-实验.md`**。
 
 > **观测与失败归因**（M5）：`GET /api/admin/stats` 给出问答次数 / 九态分布 /
@@ -280,7 +293,12 @@ python tests/test_s3c_expressiveness.py
   的参数注入 config；Starlette 的 TestClient 会把 SSE 响应整个缓冲完，
   首字节必须用真 uvicorn 量）+ 三个设计坑（`emit` 参数名与载荷撞车、
   事件接收器不能挂在共享 core 上、空 TypedDict 状态变 None）
-  → `docs/12` 第 5 节
+  + 打真模型打出的两个新问题：① 模型在 temperature=0 下仍 run-to-run
+  非确定（请求 deepseek-chat、响应 deepseek-flash），所以 30 题硬验收改为
+  **录制—重放**（loop 录 Prompt+回复 → langgraph 重放并断言 Prompt 逐字
+  一致，30/30 通过）；② 递归预算公式 `2*max_steps+5`=21 不够（8 轮要 26），
+  改 `3*max_steps+5` 并把 `RecursionError` 兜底成 `RECURSION_LIMIT` 业务结果
+  → `docs/12` §3.2
 - M3 一个"只在问过别的题之后才出现"的坑（规划器会向共享语义模型注册条件聚合
   指标，短 label"订单数"子串命中"全部订单数"，B6 从 2 列变 4 列；单题测试
   永远绿）+ 三个语义层细节（`grain` 的 SELECT/GROUP BY/ORDER BY/HAVING/WHERE
@@ -298,6 +316,11 @@ python tests/test_s3c_expressiveness.py
   会被当成 bug。口径坑：`need_clarification` 不算失败（否则主动澄清看起来
   像出错）、`empty`/`truncated` 算成功（数据事实不是系统失败）
   → `docs/15` 第 1/2/3 节
+- T7/T8 一个"同一能力两次运行两个结果"的 Prompt 边界坑：问「销售额是多少？」——
+  一次追问时间范围、一次直接给全时段合计。模型没变，是 Prompt 边界没写清
+  （「完全无法判断才追问」和「犹豫时选择作答」放在一起，模型自己临场裁量）。
+  修法是把边界写死：指标数值缺时间范围必须追问；比较/排名默认口径作答并披露；
+  预测类不编造。真模型 T7/T8 连续两次复跑通过 → `docs/05` ⑥ 后续收紧
 
 ---
 
@@ -425,9 +448,10 @@ python tests/test_m1_mysql.py
 
 # 5e) 执行器等价验收（离线部分无需 Key）
 #     6 个脚本化场景逐字段比对"自写循环"与"LangGraph 执行器"（含事件序列）；
-#     SSE 首字节用线程内真 uvicorn 量（TestClient 会把响应缓冲完，量不出首字节）
+#     递归预算用 8 次工具调用压满；SSE 首字节用线程内真 uvicorn 量
+#     （TestClient 会把响应缓冲完，量不出首字节）
 python tests/test_m2_langgraph.py
-python tests/test_m2_langgraph.py --require-live   # 需 Key：30 题逐题一致（未跑 ≠ 通过）
+python tests/test_m2_langgraph.py --require-live   # 需 Key：30 题录制—重放（30/30 一致）
 
 # 5f) 语义表达力验收（离线：时间粒度 + 标量比较，含黄金集 29/30 与 D3 口径说明）
 python tests/test_m3_semantics.py
@@ -436,11 +460,14 @@ python scripts/make_heldout.py --check
 # 按类别看准确率（论文实验章用；自检时 30/30，预测文件传入时按类汇总）
 python golden_set/evaluate.py --by-category
 
-# 5g) M4 四个实验（全部离线；模型档需 Key，脚本里会显式写"未跑"）
+# 5g) M4 四个实验（rule 全部离线；加 --with-llm 需 Key，2026-10 已补跑）
 python scripts/coverage_scan.py --plot docs/assets/coverage_curve.png  # ① 覆盖率
 python scripts/drift_table.py                                           # ② 口径漂移
 python scripts/ablation.py                                              # ③ 消融
 python scripts/heldout_eval.py                                          # ④ 留出集（只跑一次！）
+# 模型档：$env:NL2SQL_LLM_API_KEY='sk-xxx'
+# python scripts/coverage_scan.py --with-llm --plot docs/assets/coverage_curve.png
+# python scripts/heldout_eval.py --with-llm
 
 # 5h) M5 观测验收（离线：九态契约 / 聚合口径 / 两个执行器的工具上报 / 管理端点）
 python tests/test_m5_observability.py
@@ -540,9 +567,9 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | 月 | 主题 | 硬验收 |
 |---|---|---|
 | M1 | **已完成**：git + 单一版本号 + pre-commit + MySQL 适配器 | 30 题 SQLite vs MySQL **逐题一致**（M3 后 C 节已 30/30；D 节两端 29/30 同失败集） |
-| M2 | **已完成**：LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 outcome **逐题一致**，首字节 <1s |
+| M2 | **已完成**：LangGraph 智能体（`build_langgraph` + 流式） | 两执行器 6 场景逐字段一致；30 题**录制—重放 30/30 一致**（Prompt 0 偏差）；首字节 <1s |
 | M3 | **已完成**：语义层两个原语（时间粒度、标量比较） | 黄金集 **29/30 = 96.7%**（≥28/30）；D3 为黄金集口径不一致 |
-| M4 | **已完成**：实验（覆盖率扫描、口径漂移、消融、留出集） | 覆盖率曲线紧贴语义天花板（8 档差 0–1 题）；漂移 13/13 >5%；留出集 **13/20 = 65.0%**（如实记录，未据此调参） |
+| M4 | **已完成**：实验（覆盖率扫描、口径漂移、消融、留出集） | 覆盖率曲线紧贴语义天花板（8 档差 0–1 题）；漂移 13/13 >5%；留出集 **13/20 = 65.0%**（如实记录，未据此调参）；**llm 档 23/20/17、留出集 12/20**——换规划器没有提高上限 |
 | M5 | **已完成离线部分**：观测统计 + 九态失败归因 | 统计接口可用、归因文案九态齐全、契约测试 **87 项**；**真实试用 0/20 条未开始**（未跑 ≠ 通过，模板在 `docs/15`） |
 | M6 | 成文与答辩演示 | 预答辩通过 |
 
