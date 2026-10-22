@@ -70,6 +70,15 @@ class SourceConfig:
                 raise ConfigError(
                     f"[{self.source_id}] 未提供 credential_ref；密码不得明文写在配置里"
                 )
+        elif self.adapter == "jdbc":
+            if not self.options.params.get("jdbc_url"):
+                raise ConfigError(
+                    f"[{self.source_id}] jdbc 适配器需要 options.params['jdbc_url']"
+                )
+            if not self.options.params.get("driver_class"):
+                raise ConfigError(
+                    f"[{self.source_id}] jdbc 适配器需要 options.params['driver_class']"
+                )
 
 
 @dataclass
@@ -150,6 +159,9 @@ class AgentConfig:
         "semantic.read", "source.read", "knowledge.read",
         "knowledge.write", "cache.read", "cache.write",
         "session.read", "session.write", "llm.invoke", "clarify.ask",
+        # M7 项目与任务：project.read 读项目信息；task.read/task.write 读写
+        # **项目自己的任务库**（保存只读 SQL），不写业务数据源。
+        "project.read", "task.read", "task.write",
     )
 
     # ---- 插件 ----
@@ -217,6 +229,25 @@ class NL2SQLConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     # 相对时间锚点。None 表示使用真实当前时间；评测时应显式传入以保证可复现
     now: str | None = None
+
+    # ------------------------------------------------------------ 项目（M7）
+    # 一个 NL2SQLConfig 仍只对应一个引擎实例；「项目」在 Web 层是一个项目
+    # 目录 + 一份按项目构造的 NL2SQLConfig。核心层只关心三件事：
+    #   1. 项目身份（注入 Prompt、任务归集、界面展示）
+    #   2. 任务库路径（空字符串 = 不启用任务工具）
+    #   3. 数据源口令（由壳在内存里注入，不写配置、不落源码树）
+    project_id: str = "default"
+    project_name: str = ""
+    project_description: str = ""
+    # 任务库（建议 `<state_dir>/tasks.db`）。空 = 不启用 project/task 工具。
+    task_store_path: str = ""
+    # source_id -> {"password": "..."}；空则回落到 credential_ref 的环境变量。
+    credentials: dict[str, dict[str, str]] = field(default_factory=dict)
+    # 语义层模式：`auto` = 有 dbt 指标文件就用、否则用内置黄金集模型（旧行为）；
+    # `dbt` = 必须用指标文件（缺路径报错）；`none` = 不装语义层（接任意业务库，
+    # 由 agent 直接读库表写只读 SQL；`nl2sql.solve` 会因没有指标定义而失败）。
+    semantic_mode: str = "auto"
+
     # ------------------------------------------------------------ 便捷构造
     def add_sqlite(self, path: str, *, source_id: str = DEFAULT_SOURCE_ID,
                    label: str = "", semantic_path: str | None = None) -> "NL2SQLConfig":
@@ -267,6 +298,38 @@ class NL2SQLConfig:
         self.sources[source_id] = SourceConfig(
             source_id=source_id, adapter="postgres", label=label or source_id,
             options=SourceOptions(host=host, port=port, user=user, database=database),
+            credential_ref=credential_ref, semantic_path=semantic_path,
+        )
+        self.default_source = self.default_source or source_id
+        return self
+
+    def add_jdbc(self, *, jdbc_url: str, driver_class: str,
+                 source_id: str = DEFAULT_SOURCE_ID, label: str = "",
+                 jar_paths: tuple[str, ...] = (),
+                 user: str | None = None,
+                 credential_ref: str | None = "env:NL2SQL_JDBC_PASSWORD",
+                 semantic_path: str | None = None,
+                 params: dict[str, Any] | None = None) -> "NL2SQLConfig":
+        """配置一个 JDBC 泛用数据源（第四引擎，M7）。
+
+        `jdbc_url` 形如 `jdbc:mysql://127.0.0.1:3306/shop`，`driver_class`
+        形如 `com.mysql.cj.jdbc.Driver`，`jar_paths` 是驱动 jar 的本地路径
+        （可视化连接向导会下载到项目目录）。口令仍走 `credential_ref`，
+        永远不写进配置。
+
+        为什么要有 JDBC：Python 没有原生 JDBC，但 Oracle / SQL Server /
+        达梦等库通常只有 JDBC 驱动。参数化适配器（见
+        `nl2sql/sources/jdbc.py`）用 Java 桥统一接入，只读语义与其它引擎一致。
+        """
+        merged: dict[str, Any] = dict(params or {})
+        merged.update({
+            "jdbc_url": jdbc_url,
+            "driver_class": driver_class,
+            "jar_paths": list(jar_paths),
+        })
+        self.sources[source_id] = SourceConfig(
+            source_id=source_id, adapter="jdbc", label=label or source_id,
+            options=SourceOptions(user=user, params=merged),
             credential_ref=credential_ref, semantic_path=semantic_path,
         )
         self.default_source = self.default_source or source_id

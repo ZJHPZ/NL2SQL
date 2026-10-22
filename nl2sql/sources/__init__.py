@@ -10,6 +10,10 @@ PostgreSQL 是第二个用例：`nl2sql/sources/postgres.py` 同样一个文件 
 `_BUILTIN` 一行 + `config.add_postgres`，就成了第三个引擎。
 **核心层（语义/编译/守门/管线）没有改一行** —— 这不是目标本身，
 而是"capability 驱动降级"这条设计原则的直接结果。
+
+JDBC 是第四个用例：`nl2sql/sources/jdbc.py` 一个文件 + `_BUILTIN` 一行，
+把 Oracle / SQL Server / 达梦等"只有 JDBC 驱动"的数据库接进来
+（Java 桥子进程加载驱动 jar，协议见 `jdbc.py` 模块 docstring）。
 """
 from __future__ import annotations
 
@@ -114,11 +118,63 @@ def _build_postgres(source_cfg: SourceConfig, *,
     )
 
 
+def _build_jdbc(source_cfg: SourceConfig, *,
+                credentials: dict[str, str]) -> SourceAdapter:
+    """从配置 + 凭据装配 JDBC 泛用适配器。
+
+    配置约定（见 `config.add_jdbc`）::
+
+        options.params["jdbc_url"]     必填，如 jdbc:mysql://127.0.0.1:3306/shop
+        options.params["driver_class"] 必填，如 com.mysql.cj.jdbc.Driver
+        options.params["jar_paths"]    必填，驱动 jar 绝对路径列表
+                                       （可用 /api/jdbc/drivers/download 下载）
+
+    可选参数：`dialect`（覆盖从 URL 推断的方言）、`read_only`（默认 True）、
+    `bridge_dir`（Java 桥编译缓存目录）、`connect_timeout_s`。
+    口令：默认 `NL2SQL_JDBC_PASSWORD` 环境变量；JDBC 允许无口令（SQLite/
+    trust 认证），取不到时给空串而不是报错——要不要口令由数据库决定。
+    """
+    from .jdbc import JdbcAdapter
+
+    params = source_cfg.options.params or {}
+    jdbc_url = str(params.get("jdbc_url") or "").strip()
+    driver_class = str(params.get("driver_class") or "").strip()
+    if not jdbc_url or not driver_class:
+        raise ConfigError(
+            f"[{source_cfg.source_id}] jdbc 适配器需要 options.params['jdbc_url']"
+            " 和 options.params['driver_class']"
+        )
+
+    raw_jar_paths = params.get("jar_paths") or []
+    if isinstance(raw_jar_paths, (str, os.PathLike)):
+        raw_jar_paths = [os.fspath(raw_jar_paths)]
+    jar_paths = [str(p).strip() for p in raw_jar_paths if str(p).strip()]
+    if not jar_paths:
+        raise ConfigError(
+            f"[{source_cfg.source_id}] jdbc 适配器需要 options.params['jar_paths']"
+            "（驱动 jar 列表）：可调用 /api/jdbc/drivers/download 下载，如 kind=sqlite"
+        )
+
+    password = resolve_secret(source_cfg.credential_ref, credentials) or ""
+    return JdbcAdapter(
+        jdbc_url=jdbc_url,
+        driver_class=driver_class,
+        jar_paths=jar_paths,
+        user=source_cfg.options.user or str(params.get("user") or ""),
+        password=password,
+        dialect=params.get("dialect"),
+        read_only=bool(params.get("read_only", True)),
+        bridge_dir=params.get("bridge_dir"),
+        connect_timeout_s=float(params.get("connect_timeout_s") or 15.0),
+    )
+
+
 #: 内置适配器工厂。第三方数据源不必登记在这里——
 #: 传 `registry` 覆盖即可（registry 优先）。
 _BUILTIN: dict[str, Callable[..., SourceAdapter]] = {
     "mysql": _build_mysql,
     "postgres": _build_postgres,
+    "jdbc": _build_jdbc,
 }
 
 

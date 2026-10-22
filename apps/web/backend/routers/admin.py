@@ -237,14 +237,18 @@ def list_tools(engine: Any = Depends(get_engine)) -> dict[str, Any]:
             "read_only": bool(engine.config.safety.read_only),
             "max_rows": engine.config.safety.max_rows,
             "timeout_s": engine.config.safety.timeout_s,
-            # 诚实告知：目前没有任何工具实现写操作，所以授予 source.write
-            # 并不会真的解锁写库。用户有权知道这一点。
+            # 诚实告知：目前没有任何工具实现**写业务数据源**，所以授予
+            # source.write 并不会真的解锁写库。M7 的任务工具虽然是 kind="write"，
+            # 但只写项目自己的任务库（task.*），不碰业务库；这里按 source.write
+            # 能力声明来判定"真正能写业务库的工具"，避免把任务工具误报成写库能力。
             "write_tools_implemented": any(
-                t["kind"] == "write" for t in tools
+                t["kind"] == "write" and "source.write" in (t.get("requires") or [])
+                for t in tools
             ),
             "note": ("授予 source.write 不会立即解锁写操作："
-                     "当前没有实现写操作的工具，且 guard 的只读守门独立于此。"
-                     "真正的写操作防线在 guard（read_only）。"),
+                     "当前没有实现写业务数据源的工具，且 guard 的只读守门独立于此。"
+                     "真正的写操作防线在 guard（read_only）。"
+                     "任务工具（task.create/task.update）只写项目任务库，不写业务数据。"),
         },
         "loop": {
             k: getattr(engine.config.agent, k) for k in LOOP_FIELDS

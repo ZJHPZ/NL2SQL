@@ -519,6 +519,7 @@ class AgentCore:
                  config: RunConfig | None = None,
                  capabilities: tuple[Capability, ...] = (),
                  system_prompt: str = "",
+                 project_brief: str = "",
                  schema_brief: str = "",
                  skill_brief: str = "",
                  on_event: Callable[[dict[str, Any]], None] | None = None,
@@ -529,6 +530,14 @@ class AgentCore:
         self._config = config or RunConfig()
         self._capabilities = capabilities
         self._system_prompt = system_prompt
+        # 项目简报（M7）：当前项目名/描述/数据源/任务概况。
+        #
+        # 为什么也常驻注入：用户会问"这个项目里有什么""帮我建个任务"。
+        # 若模型不知道当前项目与任务工具的存在，它要么答"不知道"，要么
+        # 用 sql.execute 跑只读查询后凭结果猜——都不可接受。事实很小
+        # （几百字），常驻比"先调 project.info"更省一轮调用。
+        # 与 skill_brief 同理：只是静态事实，不含可执行内容。
+        self._project_brief = project_brief
         # 观测回调：每次工具调用后上报一条记录（M5 的"工具调用统计"）。
         # **与事件回调分开**：事件是给界面的进度流（可以没有订阅者），
         # 观测是给统计的持久化（不依赖是否有人看）。合并会让"没开 SSE
@@ -575,6 +584,10 @@ class AgentCore:
     def skill_brief(self) -> str:
         return self._skill_brief
 
+    @property
+    def project_brief(self) -> str:
+        return self._project_brief
+
     def available(self) -> bool:
         return bool(self._provider is not None and self._provider.available())
 
@@ -593,6 +606,10 @@ class AgentCore:
     def set_skill_brief(self, brief: str) -> None:
         """更新技能目录（技能在装配期只读加载，这里只是热生效入口）。"""
         self._skill_brief = brief or ""
+
+    def set_project_brief(self, brief: str) -> None:
+        """更新项目简报（切换项目 / 任务增删后由壳调用，热生效）。"""
+        self._project_brief = brief or ""
 
     def set_on_event(self, cb: Callable[[dict[str, Any]], None] | None) -> None:
         self._on_event = cb
@@ -959,6 +976,13 @@ class AgentCore:
                             final_answer="没有可用工具，无法执行查询。")
 
         system = self._system_prompt or DECISION_PROMPT
+        if self._project_brief:
+            system += ("\n\n## 当前项目\n"
+                       "下面是用户当前所在项目的事实（数据源、任务概况）。"
+                       "用户提到「这个项目」「当前项目」「我的任务」时以它为准；"
+                       "创建/修改任务用 task.create / task.update，"
+                       "任务只保存 SQL、不自动执行、也不会写业务数据。\n"
+                       + self._project_brief)
         if self._schema_brief:
             system += ("\n\n## 当前数据源的库表事实（已核对，可直接引用）\n"
                        + self._schema_brief)

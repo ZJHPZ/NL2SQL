@@ -209,3 +209,84 @@ class HistoryItem(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     detail: str = ""
+
+
+# --------------------------------------------------------------- 项目（M7）
+class ProjectCreateRequest(BaseModel):
+    """新建项目。`id` 可省略，服务端从名称生成稳定 slug。"""
+
+    id: str | None = Field(
+        default=None,
+        description="项目 id（小写字母开头，可含数字/_/-）。省略则从名称生成",
+    )
+    name: str = Field(default="", max_length=80)
+    description: str = Field(default="", max_length=500)
+    semantic: Literal["none", "dbt", "auto", "golden"] = "none"
+    metrics_path: str = Field(default="", max_length=500)
+
+    _v_name = field_validator("name")(_must_not_be_blank)
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    semantic: Literal["none", "dbt", "auto", "golden"] | None = None
+    metrics_path: str | None = Field(default=None, max_length=500)
+    planner: str | None = None
+    runtime: str | None = None
+
+
+class SourceRequest(BaseModel):
+    """新增/修改数据源，也用于「测试连接」。
+
+    `password` 只用于写入项目 secrets（或测试时临时使用），**永不回传**。
+    """
+
+    source_id: str = Field(default="", max_length=32)
+    adapter: Literal["sqlite", "mysql", "postgres", "jdbc"]
+    label: str = Field(default="", max_length=80)
+    path: str | None = Field(default=None, max_length=1000)
+    host: str | None = Field(default=None, max_length=200)
+    port: int | None = None
+    user: str | None = Field(default=None, max_length=200)
+    database: str | None = Field(default=None, max_length=200)
+    charset: str | None = Field(default=None, max_length=32)
+    password: str | None = Field(
+        default=None,
+        description="口令（可选）。保存时写入项目 secrets.json；不回传",
+    )
+    credential_ref: str | None = Field(default=None, max_length=120)
+    jdbc_url: str | None = Field(default=None, max_length=1000)
+    driver_class: str | None = Field(default=None, max_length=200)
+    jar_paths: list[str] = Field(default_factory=list)
+    read_only: bool = True
+
+
+class DriverDownloadRequest(BaseModel):
+    kind: str = Field(..., min_length=1, max_length=32)
+
+
+# --------------------------------------------------------------- 任务（M7）
+class TaskCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    sql: str = Field(..., min_length=1, max_length=20000)
+    description: str = Field(default="", max_length=1000)
+    tags: list[str] = Field(default_factory=list)
+    source_id: str | None = None
+
+    _v_name = field_validator("name")(_must_not_be_blank)
+    _v_sql = field_validator("sql")(_must_not_be_blank)
+
+
+class TaskUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    sql: str | None = Field(default=None, max_length=20000)
+    description: str | None = Field(default=None, max_length=1000)
+    tags: list[str] | None = None
+    enabled: bool | None = None
+    source_id: str | None = None
+    note: str = Field(default="", max_length=500)
+
+
+class TaskRunRequest(BaseModel):
+    source_id: str | None = None

@@ -79,6 +79,9 @@ class NL2SQL:
         # 技能目录与报告（装配期一次加载，运行期只读）
         self.skill_catalog: Any = None
         self.skill_report: Any = None
+        # M7：项目任务库（None = 未启用任务工具）。任务库是项目自己的 SQL
+        # 资产库，与业务数据源的只读访问是两件事。
+        self.task_store: Any = None
 
     def _default_semantic_model(self) -> Any:
         """装配默认语义模型。**优先用 dbt metrics.yml**。
@@ -109,6 +112,20 @@ class NL2SQL:
             self.semantic_report = loader.report
             return model
 
+        mode = (getattr(self.config, "semantic_mode", "auto") or "auto").strip()
+        if mode == "dbt":
+            from .errors import ConfigError
+
+            raise ConfigError(
+                "semantic_mode=dbt 但没有配置语义指标文件（semantic_path）"
+            )
+        if mode == "none":
+            # 接任意业务库：不假装有语义层。指标/维度为空，agent 走
+            # schema.describe + sql.execute 直接写只读 SQL。
+            from .contracts.semantic import SemanticModel
+
+            return SemanticModel(source_id=source_id)
+
         from .semantics.golden_model import build_model
 
         return build_model(order_level=True)
@@ -137,13 +154,34 @@ class NL2SQL:
         for cfg in self.config.sources.values():
             self._adapters[cfg.source_id] = build_adapter(
                 cfg, registry=self.registry,
+                # M7：连接凭据由壳在内存里注入（source_id → {"password": ...}），
+                # 不落配置文件。默认项目没有凭据时传 None，行为与 M7 之前一致。
+                credentials=(self.config.credentials or {}).get(cfg.source_id),
             )
 
         self._catalog = CatalogService(self.storage.meta, self._adapters)
+        self._build_task_store()
         self._build_knowledge()
         self._build_skills()
         self._build_pipeline()
         return self
+
+    def _build_task_store(self) -> None:
+        """装配项目任务库（M7）。**没有配置路径 = 不启用任务/项目工具**。
+
+        任务库是独立 SQLite 文件（默认 `<state_dir>/tasks.db`），与业务
+        数据源、与 app.db 都分开：任务写坏最多影响任务面板，不会污染
+        问答用的元数据/缓存/会话。
+        """
+        path = (self.config.task_store_path or "").strip()
+        if not path:
+            self.task_store = None
+            return
+        from .tasks import TaskStore
+
+        self.task_store = TaskStore(
+            path, project_id=self.config.project_id,
+        )
 
     # ------------------------------------------------------------ 技能装配
     def _build_skills(self) -> None:
@@ -351,6 +389,10 @@ class NL2SQL:
             knowledge=self._knowledge,
             planner=self._pipeline_planner,
             skill_catalog=self.skill_catalog,
+            # M7：任务库与项目信息按需装配。默认项目（无任务库）不注册
+            # 项目/任务工具——工具清单与 M7 之前保持一致，旧断言不被动摇。
+            task_store=self.task_store,
+            project_info=self._project_info if self.task_store is not None else None,
         )
         registered, skipped = 0, []
         disabled_tools = set(self.config.agent.disabled_tools)
@@ -445,6 +487,7 @@ class NL2SQL:
             self.config.agent.runtime,
             provider=provider, registry=registry, config=run_cfg,
             capabilities=granted,
+            project_brief=self._project_brief(),
             schema_brief=self._schema_brief(),
             skill_brief=skill_brief,
             on_tool_call=self._record_tool_call,
@@ -482,6 +525,96 @@ class NL2SQL:
                 lines.append(f"- {t.name}（{rows}）：{cols}")
         return "\n".join(lines)
 
+    # ------------------------------------------------------------ 项目上下文（M7）
+    def _project_info(self) -> dict[str, Any]:
+        """当前项目信息（`project.info` 工具与界面用）。
+
+        只给**安全字段**：数据源路径/主机/库名/标签，绝不带密码与凭据。
+        任务清单只给概要（id/名称/版本/更新时间），正文走 `task.get`。
+        """
+        sources: list[dict[str, Any]] = []
+        for sid, sc in self.config.sources.items():
+            item: dict[str, Any] = {
+                "source_id": sid,
+                "adapter": sc.adapter,
+                "label": sc.label or sid,
+            }
+            if sc.adapter == "sqlite":
+                item["path"] = sc.options.path
+            elif sc.adapter == "jdbc":
+                item["jdbc_url"] = (sc.options.params or {}).get("jdbc_url", "")
+            else:
+                item["host"] = sc.options.host
+                item["port"] = sc.options.port
+                item["database"] = sc.options.database
+            sources.append(item)
+        tasks = self.task_store.list() if self.task_store is not None else []
+        return {
+            "project_id": self.config.project_id,
+            "name": self.config.project_name or self.config.project_id,
+            "description": self.config.project_description,
+            "sources": sources,
+            "task_count": len(tasks),
+            "tasks_enabled": self.task_store is not None,
+            "tasks": [
+                {
+                    "task_id": t.task_id,
+                    "name": t.name,
+                    "revision": t.revision,
+                    "updated_at": t.updated_at,
+                    "last_status": t.last_status,
+                }
+                for t in tasks[:20]
+            ],
+        }
+
+    def _project_brief(self) -> str:
+        """把「当前项目」压成一小段常驻 Prompt（没有项目配置时为空串）。
+
+        为什么常驻而不是每次调 `project.info`：
+            模型判断"要不要创建任务"需要知道当前项目有没有任务库、有哪些
+            数据源；这段信息很小，常驻比多调一轮工具更省、也更稳。
+            空串时 system prompt 与 M7 之前逐字相同（旧回归不受影响）。
+        """
+        name = (self.config.project_name or "").strip()
+        description = (self.config.project_description or "").strip()
+        if not name and not description and self.task_store is None:
+            return ""
+        lines: list[str] = [
+            f"- 项目：{name or self.config.project_id}"
+            f"（id={self.config.project_id}）"
+        ]
+        if description:
+            lines.append(f"- 项目描述：{description}")
+        if self.config.sources:
+            src = "、".join(
+                f"{sc.label or sid}（{sc.adapter}，source_id={sid}）"
+                for sid, sc in self.config.sources.items()
+            )
+            lines.append(f"- 数据源：{src}")
+        if (getattr(self.config, "semantic_mode", "auto") or "auto") == "none":
+            lines.append(
+                "- 语义层：本项目**未配置指标/维度定义**。不要调用 "
+                "nl2sql.solve（会因缺指标定义而失败）；看表用 schema.describe，"
+                "取数直接写只读 SQL 调 sql.plan / sql.execute，并如实说明"
+                "结果口径由你自己拼的 SQL 决定。"
+            )
+        if self.task_store is not None:
+            tasks = self.task_store.list()
+            names = "、".join(t.name for t in tasks[:5])
+            lines.append(
+                f"- 已有任务：{len(tasks)} 条"
+                + (f"（{names}）" if names else "")
+            )
+            lines.append(
+                "- 任务操作：用 task.list / task.get 查看，task.create 创建、"
+                "task.update 修改；**任务只保存 SQL，不自动执行、不写业务数据**，"
+                "AI 修改会自动追加 `-- ai修改，时间` 注释并生成新版本。"
+            )
+        else:
+            lines.append("- 本次运行未启用任务库，不能创建/修改任务。")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------ 运行期管理
     def apply_runtime_settings(self) -> None:
         """把 `AgentConfig` 的运行期参数同步到已装配的组件。
@@ -497,6 +630,7 @@ class NL2SQL:
         cfg.temperature = self.config.agent.temperature
         self._runtime.set_system_prompt(self._load_decision_prompt())
         self._runtime.set_schema_brief(self._schema_brief())
+        self._runtime.set_project_brief(self._project_brief())
         if self.skill_catalog is not None:
             self._runtime.set_skill_brief(self.skill_catalog.catalog_text(
                 source_id=self.config.resolve_source().source_id))
@@ -742,6 +876,10 @@ class NL2SQL:
             "planner": self._pipeline_planner,
             "skill_catalog": self.skill_catalog,
             "max_rows": self.config.safety.max_rows,
+            # M7：项目/任务工具的资源（未启用任务库时为 None，工具也不会注册）
+            "task_store": self.task_store,
+            "project_info": (self._project_info
+                             if self.task_store is not None else None),
         }
 
         def _pipeline(q: str, ctx: Any) -> QueryOutcome:

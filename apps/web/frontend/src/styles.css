@@ -385,3 +385,203 @@ table.grid tbody tr:hover td { background: rgba(76,141,255,.06); }
   padding: 14px; border-radius: 6px; white-space: pre-wrap;
   color: var(--text-dim); font-size: 12.5px;
 }
+
+/* ================================================================ M7 数据开发工作台 */
+/* 以下为 M7 新增样式：顶部三视图、项目切换器、项目面板、任务面板。
+   只追加，不改上面的既有规则（.topbar 仅追加 flex-wrap，让窄屏下导航换行）。 */
+
+.topbar { flex-wrap: wrap; }
+
+.topnav {
+  display: flex; gap: 2px; padding: 2px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+}
+.navbtn {
+  padding: 5px 14px; background: none; border: none; border-radius: 4px;
+  color: var(--text-dim); cursor: pointer; font-size: 13px;
+}
+.navbtn:hover { color: var(--text); }
+.navbtn.active { background: var(--bg-raise); color: var(--text); font-weight: 600; }
+
+.project-switcher { display: flex; align-items: center; gap: 6px; }
+.project-select {
+  max-width: 170px; padding: 4px 8px; font-size: 12.5px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.project-switcher-error {
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 11.5px;
+}
+
+/* ---------------------------------------------------------------- 工作台两栏 */
+.workspace { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.ws-side {
+  width: 300px; flex: none; display: flex; flex-direction: column;
+  overflow: auto; background: var(--bg-soft);
+  border-right: 1px solid var(--border);
+}
+.ws-main { flex: 1; min-width: 0; overflow: auto; padding: 14px; }
+.ws-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; border-bottom: 1px solid var(--border);
+}
+.ws-list { list-style: none; margin: 0; padding: 0; }
+.ws-list li { border-bottom: 1px solid var(--border); }
+.ws-item {
+  display: block; width: 100%; padding: 8px 12px; text-align: left;
+  background: none; border: none; cursor: pointer; color: var(--text);
+}
+.ws-item:hover { background: var(--bg-raise); }
+.ws-item.active { background: var(--bg-raise); border-left: 2px solid var(--accent); }
+.ws-item-title {
+  display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-item-preview {
+  margin: 3px 0; color: var(--text-dim); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-item-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------------- 项目面板 */
+.detail-head {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; margin-bottom: 8px;
+}
+.detail-title { margin: 0; font-size: 18px; font-weight: 600; }
+.detail-desc {
+  margin-bottom: 10px; color: var(--text-dim);
+  font-size: 13px; line-height: 1.6;
+}
+
+.section-box {
+  padding: 12px; margin-bottom: 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.section-title {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 9px; font-size: 13px; font-weight: 600;
+}
+.form-box { background: var(--bg-soft); }
+
+.notice-box {
+  max-width: 760px; padding: 14px;
+  border: 1px dashed var(--border); border-radius: 6px;
+  color: var(--text-dim); font-size: 13px; line-height: 1.7;
+}
+.notice-title { margin-bottom: 4px; color: var(--warn); font-weight: 600; }
+
+.mini-form {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.field-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px; margin-bottom: 10px;
+}
+.field {
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 0; font-size: 12px; color: var(--text-dim);
+}
+.field input, .field textarea, .field select {
+  padding: 6px 9px; font-size: 13px; font-family: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.field textarea { resize: vertical; line-height: 1.55; }
+.field input:focus, .field textarea:focus, .field select:focus {
+  outline: none; border-color: var(--accent);
+}
+.field.span2 { grid-column: 1 / -1; }
+.field-check {
+  flex-direction: row; align-items: center; gap: 8px;
+  grid-column: 1 / -1; color: var(--text); font-size: 12.5px;
+}
+.field-static {
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 0; font-size: 12px; color: var(--text-dim);
+}
+.field-static b, .field-static .mono { color: var(--text); overflow-wrap: anywhere; }
+.form-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.source-card {
+  padding: 10px 12px; margin-bottom: 9px;
+  background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.source-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.source-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 11.5px;
+}
+
+.preview-box {
+  max-height: 320px; overflow: auto;
+  margin-top: 8px; padding: 8px 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.preview-tables { display: flex; flex-direction: column; gap: 8px; }
+.preview-table { padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
+.preview-table:last-child { border-bottom: none; }
+.preview-table-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.driver-box {
+  margin: 8px 0; padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.driver-title { margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+.test-result { margin-top: 8px; }
+
+/* AI 修改必须有独立颜色：用户要知道这段 SQL 是模型改的，不是自己改的 */
+.badge-ai {
+  background: rgba(210, 168, 255, .18);
+  color: #d2a8ff;
+  border: 1px solid rgba(210, 168, 255, .35);
+}
+
+/* ---------------------------------------------------------------- 任务面板 */
+.sql-editor {
+  display: block; width: 100%;
+  padding: 10px 12px; line-height: 1.6; tab-size: 2; resize: vertical;
+  font-family: var(--mono); font-size: 12.5px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.sql-editor:focus { outline: none; border-color: var(--accent); }
+
+.rev-list { list-style: none; margin: 0; padding: 0; }
+.rev-item {
+  padding: 8px 10px; margin-bottom: 7px;
+  background: var(--bg);
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.rev-item.rev-ai { border-left: 3px solid #d2a8ff; }
+.rev-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rev-note { margin-top: 5px; color: var(--text-dim); font-size: 12px; }
+.rev-sql {
+  max-height: 320px; overflow: auto;
+  margin: 8px 0 0; padding: 9px 10px;
+  line-height: 1.6; white-space: pre-wrap;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+}
+
+@media (max-width: 920px) {
+  .workspace { flex-direction: column; }
+  .ws-side {
+    width: 100%; max-height: 38vh;
+    border-right: none; border-bottom: 1px solid var(--border);
+  }
+  .field-grid { grid-template-columns: 1fr; }
+}

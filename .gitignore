@@ -19,6 +19,13 @@ data/
 *.db-journal
 *.sqlite3
 
+# ---- 多项目工作台数据（M7）----
+# 每个项目一个目录：project.toml / secrets.json（本地凭据）/ state/（任务库、缓存）
+# 用户数据与口令绝不入库
+projects/
+# pnpm 离线 store（本地依赖缓存，可由 package.json 还原）
+.pnpm-store/
+
 # ---- 本地配置与凭据 ----
 # 绝不入库：连接配置、凭据引用、本地覆盖
 .env

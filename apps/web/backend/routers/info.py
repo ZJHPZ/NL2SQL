@@ -11,14 +11,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
-from ..deps import get_engine
+from ..deps import get_engine, get_project_entry
 from ..schemas import HistoryItem, InfoResponse
 
 router = APIRouter(prefix="/api", tags=["info"])
-
-
-def _holder(request: Request) -> Any:
-    return getattr(request.app.state, "engine_holder", None)
 
 
 @router.get("/info", response_model=InfoResponse)
@@ -28,13 +24,15 @@ def info(request: Request) -> InfoResponse:
     **引擎没起来的时候也要能回答**——这是这个接口存在的意义之一。
     早期版本用 `Depends(get_engine)`，引擎装配失败时会直接 503，
     用户只看到"核心引擎未就绪"，完全不知道是**哪个文件写错了**。
-    现在改为直接读 `app.state`，把启动期的 warnings 一并透出。
+    现在改为直接读项目引擎条目，把启动期/装配期的 warnings 一并透出。
     """
     from nl2sql import __version__
 
-    holder = _holder(request)
-    startup = list(getattr(holder, "warnings", []) or [])
-    engine = getattr(holder, "engine", None)
+    entry = get_project_entry(request)
+    startup = list(entry.warnings)
+    if entry.error:
+        startup.append(entry.error)
+    engine = entry.engine
 
     if engine is None:
         # 启动就失败：把原因原文交出去，界面才能显示"改哪里"
@@ -165,8 +163,10 @@ def history(source_id: str | None = None, limit: int = 50,
 def health(request: Request,
            engine: Any = Depends(get_engine)) -> dict[str, Any]:
     """轻量健康检查，供界面轮询与启动自检。"""
-    holder = _holder(request)
-    startup = list(getattr(holder, "warnings", []) or [])
+    entry = get_project_entry(request)
+    startup = list(entry.warnings)
+    if entry.error:
+        startup.append(entry.error)
     result: dict[str, Any] = {"ok": True, "planner_mode": engine.planner_mode}
     if startup:
         # 启动期的警告（含引擎装配失败的原因）必须能从这里看到

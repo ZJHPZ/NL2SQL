@@ -36,12 +36,13 @@ class BuiltinDeps:
 
     __slots__ = ("semantic_model", "compiler", "guard", "adapter", "cache",
                  "catalog", "knowledge", "planner", "session_state",
-                 "skill_catalog")
+                 "skill_catalog", "task_store", "project_info")
 
     def __init__(self, *, semantic_model: Any = None, compiler: Any = None,
                  guard: Any = None, adapter: Any = None, cache: Any = None,
                  catalog: Any = None, knowledge: Any = None,
-                 planner: Any = None, skill_catalog: Any = None) -> None:
+                 planner: Any = None, skill_catalog: Any = None,
+                 task_store: Any = None, project_info: Any = None) -> None:
         self.semantic_model = semantic_model
         self.compiler = compiler
         self.guard = guard
@@ -51,6 +52,9 @@ class BuiltinDeps:
         self.knowledge = knowledge
         self.planner = planner
         self.skill_catalog = skill_catalog
+        # M7：任务库（None = 不启用任务工具）与项目信息（callable 或 dict）。
+        self.task_store = task_store
+        self.project_info = project_info
 
 
 # ===================================================================== 工具
@@ -633,8 +637,10 @@ def _registry_classes() -> tuple[type, ...]:
 
     注意 `SkillLoadTool` 也在这里：管理界面的"工具全集"要能看到它
     （用户得知道有这么一个工具），但它**按需注册**——只有目录里有技能时
-    才真正进运行时（见 `build_builtin_tools`）。
+    才真正进运行时（见 `build_builtin_tools`）。M7 的项目/任务工具同理。
     """
+    from .tool_tasks import task_tool_classes
+
     return (
         ListMetricsTool,
         DescribeMetricTool,
@@ -646,7 +652,7 @@ def _registry_classes() -> tuple[type, ...]:
         SqlExecuteTool,
         Nl2SqlSolveTool,
         ClarifyAskTool,
-    )
+    ) + task_tool_classes()
 
 
 def builtin_tool_specs() -> list[ToolSpec]:
@@ -694,6 +700,11 @@ def build_builtin_tools(deps: BuiltinDeps) -> list[Any]:
         # 却不知道有哪些技能——那等于让它盲猜名字。
         tool.spec = dynamic
         tools.append(tool)
+
+    # M7：项目/任务工具按装配情况条件注册（无任务库就不给模型白花一步的机会）。
+    from .tool_tasks import build_task_tools
+
+    tools.extend(build_task_tools(deps))
     return tools
 
 

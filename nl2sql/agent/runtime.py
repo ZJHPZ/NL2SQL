@@ -64,6 +64,7 @@ class AgentRuntime:
                  config: RunConfig | None = None,
                  capabilities: tuple[Capability, ...] = (),
                  system_prompt: str = "",
+                 project_brief: str = "",
                  schema_brief: str = "",
                  skill_brief: str = "",
                  on_event: Callable[[dict[str, Any]], None] | None = None,
@@ -72,6 +73,7 @@ class AgentRuntime:
         self._core = AgentCore(
             provider=provider, registry=registry, config=config,
             capabilities=capabilities, system_prompt=system_prompt,
+            project_brief=project_brief,
             schema_brief=schema_brief, skill_brief=skill_brief,
             on_event=on_event,
             on_tool_call=on_tool_call,
@@ -101,6 +103,9 @@ class AgentRuntime:
 
     def set_skill_brief(self, brief: str) -> None:
         self._core.set_skill_brief(brief)
+
+    def set_project_brief(self, brief: str) -> None:
+        self._core.set_project_brief(brief)
 
     def set_on_event(self,
                      cb: Callable[[dict[str, Any]], None] | None) -> None:

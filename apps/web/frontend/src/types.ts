@@ -198,6 +198,231 @@ export interface HistoryItem {
   meta: Record<string, unknown>
 }
 
+// ================================================================ M7 数据开发工作台
+// 契约正文：_tmp/m7_api_contract.md。字段名与后端保持 snake_case 一致，
+// 不做驼峰转换：契约是前后端共同的准绳，少一层映射就少一处对不上的可能。
+
+/** 数据源适配器。`postgres` 是契约里的写法（不是 postgresql） */
+export type SourceAdapter = 'sqlite' | 'mysql' | 'postgres' | 'jdbc'
+
+/** 数据源回传信息。
+ * **口令永远不回传**：只有 has_password 告诉界面"有没有配过密码"。
+ */
+export interface SourceOut {
+  source_id: string
+  adapter: SourceAdapter | string
+  label: string
+  path: string
+  host: string
+  port: number
+  user: string
+  database: string
+  has_password: boolean
+  driver_class: string
+  jdbc_url: string
+  jar_paths: string[]
+}
+
+/** 新建/覆盖数据源的表单载荷（POST /sources 与 /sources/test 共用） */
+export interface SourceIn {
+  adapter: SourceAdapter | string
+  label?: string
+  source_id?: string
+  path?: string
+  host?: string
+  port?: number
+  user?: string
+  database?: string
+  /** 只在保存时发送；编辑已有数据源时留空表示"不改密码" */
+  password?: string
+  driver_class?: string
+  jdbc_url?: string
+  jar_paths?: string[]
+  read_only?: boolean
+}
+
+/** 测试连接返回的列预览 */
+export interface SourceColumnPreview {
+  name: string
+  data_type: string
+  nullable: boolean
+}
+
+/** 测试连接返回的表预览（最多 100 张 / 每张 200 列） */
+export interface SourceTablePreview {
+  name: string
+  row_estimate: number | null
+  columns: SourceColumnPreview[]
+}
+
+/** POST /api/projects/{pid}/sources/test 的返回。
+ * 连接失败是业务结果（ok:false），HTTP 仍是 200，不能当异常处理。
+ */
+export interface SourceTestResult {
+  ok: boolean
+  message: string
+  dialect: string
+  elapsed_ms: number
+  tables: SourceTablePreview[]
+}
+
+/** GET /api/projects/{pid}/sources/{sid}/tables */
+export interface SourceTablesResult {
+  source_id: string
+  tables: SourceTablePreview[]
+  truncated: boolean
+}
+
+/** POST /api/projects/{pid}/sources/{sid}/snapshot */
+export interface SourceSnapshotResult {
+  table_count: number
+  fingerprint: string
+  warnings: string[]
+}
+
+/** 项目摘要与详情同构：详情只是 sources 更完整。 */
+export interface ProjectSummary {
+  id: string
+  name: string
+  description: string
+  /** "golden" | "dbt" | "none" */
+  semantic: string
+  /** semantic=dbt 时是 dbt metrics.yml 路径 */
+  metrics_path: string
+  sources: SourceOut[]
+  created_at: string
+  updated_at: string
+  /** default 项目不可删除/改名（后端 400 兜底，界面也置灰） */
+  is_default: boolean
+  task_count: number
+}
+
+export type ProjectDetail = ProjectSummary
+
+export interface ProjectListResponse {
+  default_project_id: string
+  projects: ProjectSummary[]
+}
+
+export interface ProjectCreateIn {
+  name: string
+  description?: string
+}
+
+export interface ProjectUpdateIn {
+  name?: string
+  description?: string
+  semantic?: string
+  metrics_path?: string
+}
+
+/** JDBC 驱动状态。kind ∈ sqlite / mysql / postgresql / mssql */
+export interface DriverInfo {
+  kind: string
+  name: string
+  maven: string
+  downloaded: boolean
+  /** 已下载时的路径（相对仓库根或绝对路径，原样展示） */
+  path: string
+}
+
+export interface DriversResponse {
+  drivers: DriverInfo[]
+}
+
+export interface DriverDownloadResult {
+  ok: boolean
+  path?: string
+  message?: string
+}
+
+/** 任务列表项 */
+export interface TaskSummary {
+  task_id: string
+  name: string
+  description: string
+  status: string
+  /** 前若干字符，列表里做一行预览 */
+  sql_preview: string
+  revision: number
+  updated_at: string
+  updated_by: string
+}
+
+/** 任务详情 */
+export interface TaskDetail {
+  task_id: string
+  project_id: string
+  name: string
+  description: string
+  sql: string
+  status: string
+  created_by: string
+  updated_by: string
+  created_at: string
+  updated_at: string
+  revision: number
+}
+
+/** 版本记录。AI 修改（author="ai"）要在界面上有角标 */
+export interface TaskRevision {
+  revision: number
+  /** "user" | "ai" */
+  author: string
+  note: string
+  created_at: string
+  sql: string
+}
+
+export type RevisionOut = TaskRevision
+
+export interface TaskListResponse {
+  tasks: TaskSummary[]
+}
+
+/** GET /api/projects/{pid}/tasks/{tid} 的返回：详情 + 版本历史一次给全 */
+export interface TaskDetailResponse {
+  task: TaskDetail
+  revisions: TaskRevision[]
+}
+
+export interface TaskCreateResult {
+  task: TaskDetail
+  revision: number
+}
+
+export interface TaskUpdateResult {
+  task: TaskDetail
+  revision: number
+}
+
+export interface TaskRevisionsResponse {
+  revisions: TaskRevision[]
+}
+
+/** 任务运行的结果集。
+ * 比 QueryResponse.result 窄：没有 data_time/cached/warnings，
+ * 展示前由 TasksPanel 补齐成 ResultPayload 再交给 ResultTable。
+ */
+export interface TaskRunResultPayload {
+  columns: string[]
+  rows: unknown[][]
+  row_count: number
+  truncated?: boolean
+  elapsed_ms?: number
+}
+
+/** POST /api/projects/{pid}/tasks/{tid}/run 的返回。
+ * 只读守卫拒绝时 ok:false / status:"blocked"，HTTP 仍是 200。
+ */
+export interface TaskRunResponse {
+  ok: boolean
+  status: string
+  sql: string
+  result: TaskRunResultPayload | null
+  message: string
+}
+
 // ---------------------------------------------------------------- 插件与工具管理
 export interface ToolInfo {
   name: string

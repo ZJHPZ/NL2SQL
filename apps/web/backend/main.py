@@ -27,10 +27,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .deps import EngineHolder
+from .projects import ProjectHub, ProjectStore
 from .routers import admin as admin_router
 from .routers import info as info_router
 from .routers import knowledge as knowledge_router
+from .routers import projects as projects_router
 from .routers import query as query_router
+from .routers import tasks as tasks_router
 from .shell_config import build_shell_config, read_env
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -64,8 +67,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 启动失败也要让服务起来，否则界面只能白屏
         holder.warnings.append(f"引擎装配失败: {e}")
 
+    # ---------------------------------------------------------- 项目中心
+    # M7：多项目。默认项目 = 上面这个环境变量引擎（旧行为完全不变）；
+    # 其它项目按 `projects/<id>/project.toml` 懒加载各自引擎。
+    try:
+        projects_root = os.environ.get("NL2SQL_PROJECTS_DIR") or os.path.join(
+            os.getcwd(), "projects")
+        hub = ProjectHub(
+            ProjectStore(projects_root),
+            provider=provider,
+            default_engine=holder.engine,
+            default_cfg=cfg,
+            default_warnings=holder.warnings,
+        )
+        app.state.project_hub = hub
+    except Exception as e:  # noqa: BLE001 - 项目中心坏掉不阻断演示环境
+        holder.warnings.append(f"项目中心不可用: {e}")
+
     yield
 
+    hub = getattr(app.state, "project_hub", None)
+    if hub is not None:
+        hub.close()
     holder.close()
 
 
@@ -90,6 +113,8 @@ def create_app() -> FastAPI:
     app.include_router(query_router.router)
     app.include_router(knowledge_router.router)
     app.include_router(admin_router.router)
+    app.include_router(projects_router.router)
+    app.include_router(tasks_router.router)
 
     # ---------------------------------------------------------- 异常处理
     # 核心层的可预期错误（配置错、连接失败）应转成结构化 HTTP 错误，

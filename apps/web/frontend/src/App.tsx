@@ -6,13 +6,14 @@
  * 理由：开发者会反复扫结果、改 SQL 再跑；聊天流里没有"当前 SQL"
  * 这个稳定对象，滚两下就找不到刚才的结果了。
  */
-import { useCallback, useEffect, useState } from 'react'
-import { api } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api, getProjectId, setProjectId } from './api'
 import type {
   HistoryItem,
   InfoResponse,
   KnowledgeHit,
   KnowledgeItem,
+  ProjectSummary,
   QueryResponse,
   TableInfo,
 } from './types'
@@ -21,8 +22,22 @@ import { SqlPanel } from './components/SqlPanel'
 import { StatusBar } from './components/StatusBar'
 import { HistoryPanel, KnowledgePanel } from './components/SidePanels'
 import { PluginAdminPanel } from './components/PluginAdminPanel'
+import { ProjectSwitcher } from './components/ProjectSwitcher'
+import { ProjectsPanel } from './components/ProjectsPanel'
+import { TasksPanel } from './components/TasksPanel'
 
 type SideTab = 'history' | 'knowledge' | 'admin'
+
+/** 顶层三个视图。不引入 router：只有一个页面，切 tab 而已。
+ *  项目/任务面板只在切到对应视图时挂载 → 数据按需加载，问答页不多打接口。
+ */
+type View = 'ask' | 'projects' | 'tasks'
+
+const VIEWS: { id: View; label: string }[] = [
+  { id: 'ask', label: '问答' },
+  { id: 'projects', label: '项目' },
+  { id: 'tasks', label: '任务' },
+]
 
 /** 执行器的中文名。
  * 只写"哪个调度"不够：用户要知道**这意味着什么**，
@@ -54,6 +69,17 @@ export default function App() {
   // 首次提问为空，服务端生成后回传，我们记住并在下一轮带上。
   const [sessionId, setSessionId] = useState<string | null>(null)
 
+  // ---------------------------------------------------------------- 视图与项目（M7）
+  const [view, setView] = useState<View>('ask')
+  // ref 与 state 同步保存当前项目：loadProjects 的依赖为空，
+  // 避免切换项目 -> 重载项目列表 -> 列表回调再触发切项目的循环。
+  const projectIdRef = useRef<string>(getProjectId())
+  const [projectId, setProjectIdState] = useState<string>(projectIdRef.current)
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [defaultProjectId, setDefaultProjectId] = useState<string>('default')
+  const [projectsLoading, setProjectsLoading] = useState(false)
+  const [projectsError, setProjectsError] = useState<string | null>(null)
+
   // ---------------------------------------------------------------- 启动
   useEffect(() => {
     ;(async () => {
@@ -83,6 +109,54 @@ export default function App() {
   useEffect(() => {
     if (info) void reloadSide()
   }, [info, reloadSide])
+
+  // ---------------------------------------------------------------- 项目（M7）
+  /** 拉项目列表。失败只记错误不白屏：后端没实现 /api/projects 时，
+   *  问答页必须照常可用，只是顶栏显示"项目列表加载失败"。 */
+  const loadProjects = useCallback(async () => {
+    setProjectsLoading(true)
+    const r = await api.listProjects()
+    setProjectsLoading(false)
+    if (!r.ok) {
+      setProjectsError(`${r.error.error}: ${r.error.detail}`)
+      return
+    }
+    setProjectsError(null)
+    const def = r.data.default_project_id || 'default'
+    setDefaultProjectId(def)
+    const list = r.data.projects ?? []
+    setProjects(list)
+    // 当前项目已被删除 / 不在本机时回退默认项目，否则所有接口都会 404
+    const cur = projectIdRef.current
+    if (!list.some((p) => p.id === cur) && cur !== def) {
+      projectIdRef.current = def
+      setProjectId(def)
+      setProjectIdState(def)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadProjects()
+  }, [loadProjects])
+
+  /** 切换项目：持久化到 localStorage，并清掉上一个项目的问答上下文。
+   *  旧结果属于旧项目的数据源，留在屏幕上会让人把两组数据搞混。
+   */
+  const switchProject = useCallback(
+    (id: string) => {
+      if (!id || id === projectIdRef.current) return
+      projectIdRef.current = id
+      setProjectId(id)
+      setProjectIdState(id)
+      setData(null)
+      setSessionId(null)
+      setReqError(null)
+      setShowTables(false)
+      // 历史 / 表结构 / 知识库都是项目维度（请求带 X-Project-Id），换项目后重拉
+      void reloadSide()
+    },
+    [reloadSide],
+  )
 
   // ---------------------------------------------------------------- 动作
   const runQuery = async (override?: string) => {
@@ -188,6 +262,17 @@ export default function App() {
           talk-to-sql
           {info && <span className="meta">v{info.version}</span>}
         </div>
+        <nav className="topnav">
+          {VIEWS.map((v) => (
+            <button
+              key={v.id}
+              className={view === v.id ? 'navbtn active' : 'navbtn'}
+              onClick={() => setView(v.id)}
+            >
+              {v.label}
+            </button>
+          ))}
+        </nav>
         <div className="topbar-info">
           {info && (
             <>
@@ -249,6 +334,15 @@ export default function App() {
             </>
           )}
         </div>
+        <ProjectSwitcher
+          projectId={projectId}
+          projects={projects}
+          defaultProjectId={defaultProjectId}
+          loading={projectsLoading}
+          error={projectsError}
+          onChange={switchProject}
+          onReload={() => void loadProjects()}
+        />
         <span className="spacer" />
         {sessionId && (
           <span className="meta" title={`当前会话 ${sessionId}`}>
@@ -267,6 +361,8 @@ export default function App() {
         </button>
       </header>
 
+      {view === 'ask' && (
+        <>
       {/* 引擎装配失败：必须把**原因原文**摆出来。
           早先这种情况只显示"核心引擎未就绪"，用户完全不知道是哪个文件写错了
           （比如 dbt 指标文件路径写错），只能去翻服务端日志。 */}
@@ -446,6 +542,29 @@ export default function App() {
           {tab === 'admin' && <PluginAdminPanel />}
         </aside>
       </div>
+        </>
+      )}
+
+      {view === 'projects' && (
+        <main className="main">
+          <ProjectsPanel
+            key={projectId}
+            projectId={projectId}
+            onSelectProject={switchProject}
+            onProjectsChanged={() => void loadProjects()}
+          />
+        </main>
+      )}
+
+      {view === 'tasks' && (
+        <main className="main">
+          <TasksPanel
+            key={projectId}
+            projectId={projectId}
+            isDefaultProject={projectId === defaultProjectId}
+          />
+        </main>
+      )}
     </div>
   )
 }
