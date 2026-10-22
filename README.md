@@ -25,6 +25,7 @@
 | **T1–T7** | **升级为智能体：工具循环 + 插件体系** | ✅ |
 | **P0** | **插件与工具管理（看得见 / 管得了 / 配得了）** | ✅ |
 | **P0b** | **技能机制（`SKILL.md`）：发现 / 报告 / `skill.load` / 界面第四块** | ✅ 见 `docs/08` |
+| **P1** | **项目 playbook 技能 3 份 + 引导注入 + 决策场景集（选择 11/12；正确率差值在噪声内）** | ✅ 见 `docs/08` §13 |
 | **M1** | **第二、三个引擎：MySQL + PostgreSQL 适配器 + 跨引擎等价验收** | ✅ 见 `docs/11`（PostgreSQL 为 2026-10 补做，§10） |
 | **M2** | **LangGraph 执行器 + SSE 流式（30 题录制—重放 30/30 一致）** | ✅ 见 `docs/12` |
 | **M3** | **语义层两个原语：时间粒度 + 标量比较（黄金集 29/30）** | ✅ 见 `docs/13` |
@@ -392,7 +393,10 @@ talk-to-sql/
 │   └── demo/            示例插件：数据质量探查工具（可当模板抄）
 │
 ├── skills/              **技能目录（声明式档：只写文本，不写代码）**
-│   └── README.md        格式说明（P0 只通了机制，P1 才放项目自己的 playbook）
+│   ├── cross-period-comparison/      跨期对比（两个时间窗并排取数）
+│   ├── having-vs-group-filter/       组级条件（HAVING vs 行级 WHERE）
+│   ├── unverified-metric-disclosure/ 口径未注册的指标：披露而不是编
+│   └── README.md        格式说明（P0 通机制，P1 放入项目 playbook）
 │
 ├── apps/                三个壳：只做适配，不含业务逻辑
 │   ├── web/             壳① 本地 Web 工作台（首发，已完成）
@@ -472,6 +476,10 @@ python tests/test_p0_plugin_admin.py
 # 5b2b) 技能机制验收（发现 / 信任模型 / 报告 / skill.load / 界面第四块）
 #       硬断言之一是"零技能配置下工具清单与加机制之前逐字相同"
 python tests/test_p0b_skills.py
+
+# 5b2c) 决策场景集（行为评测层：追问 / 披露 / 没数据时不编；需 Key）
+#       同一场景集跑 baseline vs skills；差值只作量级参考，未跑 ≠ 通过
+python scripts/decision_eval.py --mode both
 
 # 5b3) 插件作者视角试炼（换个身份写一个真插件，验证"可插拔"不是自说自话）
 python scripts/plugin_dev_trial.py --no-llm    # 离线 1–5 节
@@ -588,7 +596,7 @@ python scripts/compare_planners.py        # 规则 vs 模型 逐题对比与互�
 | `docs/05-内部试用记录.md` | 内部试用的真实问题清单 |
 | `docs/06-dbt指标加载.md` | `metrics.yml` 两套规范、表达式与 JOIN 推导、portability |
 | `docs/07-语义层表达能力.md` | 缺口清单、四个真坑、四种规划器实测 |
-| `docs/08-技能设计草案.md` | 声明式档（`SKILL.md`）、P0 实施记录、P1–P3 待拍板 |
+| `docs/08-技能设计草案.md` | 声明式档（`SKILL.md`）、P0/P1 实施记录（引导注入 + 3 份 playbook + 决策场景集对照实验）、P2–P3 待拍板 |
 | `docs/09-参考实现-superpowers.md` | 可迁移的五条、不该抄的四条 |
 | `docs/11-MySQL适配器与跨引擎等价.md` | 适配器四层、**判分器漂移**、只读账号与 `credential_ref`；C3 缺口由 M3 闭合（C 节 30/30）；**§10 第三引擎 PostgreSQL**（核心零改动、30/30 跨引擎等价、embedded PG 起停与沙箱限制） |
 | `docs/12-LangGraph执行器与等价性.md` | 单步状态机、图谱、两执行器等价性、SSE 首字节、五个"数字不对"的坑 |

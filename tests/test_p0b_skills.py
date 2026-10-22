@@ -421,6 +421,97 @@ def test_no_behavior_change(work: str) -> None:
               "★ 但它出现在报告里（看得见、可点名启用）", str(ext_skipped))
 
 
+# --------------------------------------------------------------------- F
+def test_skill_brief_injection(work: str) -> None:
+    section("[F] 技能目录注入 system prompt（P1 的引导注入机制）")
+    from nl2sql.agent.machine import AgentCore
+    from nl2sql.contracts.llm import LLMResponse
+    from nl2sql.contracts.tool import ToolResult, ToolSpec
+    from nl2sql.plugins import ToolRegistry
+
+    class ScriptedProvider:
+        name = "scripted"
+        model = "scripted"
+
+        def __init__(self) -> None:
+            self.calls: list[list] = []
+
+        def available(self) -> bool:
+            return True
+
+        def chat(self, messages, **kw):  # noqa: ANN001, ANN003
+            self.calls.append(list(messages))
+            return LLMResponse(text='{"kind":"final","answer":"ok","thought":"x"}')
+
+    class EchoTool:
+        spec = ToolSpec(name="echo", description="回显", params={
+            "type": "object", "properties": {}}, kind="none")
+
+        def run(self, args, ctx):  # noqa: ANN001
+            return ToolResult(ok=True, data="ok")
+
+    def _core(provider, skill_brief: str = "") -> AgentCore:
+        reg = ToolRegistry(granted=(), origin="core")
+        reg.register(EchoTool())
+        return AgentCore(provider=provider, registry=reg,
+                         skill_brief=skill_brief)
+
+    # 1) 零技能：不注入引导（P0 的"行为不变"仍成立）
+    p0 = ScriptedProvider()
+    _core(p0)._ask_model(["用户: 你好"])  # noqa: SLF001
+    system0 = p0.calls[-1][0].content
+    check("可用技能" not in system0,
+          "★ 无技能目录时不注入引导（零技能行为逐字不变）")
+
+    # 2) 有目录：引导小节 + 目录行 + 按需加载方式
+    p1 = ScriptedProvider()
+    _core(p1, "- period-comparison: 跨期对比时使用")._ask_model(
+        ["用户: 本月和上月实收金额分别是多少"])  # noqa: SLF001
+    system1 = p1.calls[-1][0].content
+    check("可用技能" in system1, "★ 有目录时注入「可用技能」小节")
+    check("period-comparison" in system1 and "跨期对比时使用" in system1,
+          "★ 目录行含技能名与 description")
+    check("skill.load" in system1,
+          "★ 引导里写明了按需加载的方式（不强制每次调用）")
+    check("不要为了加载而加载" in system1,
+          "★ 引导明确不是「必须先加载」（省一步调用）")
+
+    # 3) 真实加载器 → catalog_text → 直接可注入
+    root = os.path.join(work, "skills_boot")
+    _write(os.path.join(root, "pc", "SKILL.md"),
+           _skill_md("period-comparison", "用户把两个时间段并排提问时使用"))
+    cat = _loader().load(project_dirs=[root], external_dirs=[])
+    p2 = ScriptedProvider()
+    _core(p2, cat.catalog_text())._ask_model(["用户: 本月和上月对比"])  # noqa: SLF001
+    system2 = p2.calls[-1][0].content
+    check("period-comparison" in system2,
+          "★ 加载器产出的 catalog_text 可直接用于引导注入")
+
+    # 4) 两个执行器都透传（LangGraph 未装时只验 loop）
+    from nl2sql.agent.runtime import AgentRuntime
+
+    rt = AgentRuntime(provider=p1, registry=_core(p1).registry,
+                      skill_brief="- demo: 演示")
+    check(rt.core.skill_brief == "- demo: 演示",
+          "★ loop 执行器把 skill_brief 透传到 AgentCore")
+    rt.set_skill_brief("- demo2: 演示2")
+    check(rt.core.skill_brief == "- demo2: 演示2",
+          "★ set_skill_brief 可热生效（Prompt 外置/热更新同路径）")
+
+    try:
+        from nl2sql.agent.graph import LangGraphRuntime
+        from nl2sql.agent.factory import langgraph_available
+    except Exception:  # noqa: BLE001 - langgraph 未装
+        langgraph_available = lambda: False  # noqa: E731
+    if langgraph_available():
+        gr = LangGraphRuntime(provider=p1, registry=_core(p1).registry,
+                              skill_brief="- demo: 演示")
+        check(gr.core.skill_brief == "- demo: 演示",
+              "★ graph 执行器同样透传 skill_brief")
+    else:
+        print("  info  langgraph 未安装，跳过图执行器透传断言")
+
+
 def main() -> int:
     base = os.environ.get("NL2SQL_TEST_TMP") or os.path.join(
         ROOT, "data", "_test_p0b")
@@ -441,6 +532,7 @@ def main() -> int:
         test_report_and_prompt(work)
         test_skill_load_tool(work)
         test_no_behavior_change(work)
+        test_skill_brief_injection(work)
     except Exception:
         traceback.print_exc()
         _failures.append("未捕获异常")

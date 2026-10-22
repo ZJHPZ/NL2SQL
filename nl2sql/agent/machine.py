@@ -520,6 +520,7 @@ class AgentCore:
                  capabilities: tuple[Capability, ...] = (),
                  system_prompt: str = "",
                  schema_brief: str = "",
+                 skill_brief: str = "",
                  on_event: Callable[[dict[str, Any]], None] | None = None,
                  on_tool_call: Callable[[dict[str, Any]], None] | None = None
                  ) -> None:
@@ -540,6 +541,17 @@ class AgentCore:
         # 它说得不算错（有依据），但明显不完整——而完整的表清单我们本来就有。
         # 把事实摆在 Prompt 里，比要求模型"先去查"更省一轮调用，也更准。
         self._schema_brief = schema_brief
+        # 技能目录（一行一个 name+description，不含正文）。
+        #
+        # 为什么必须注入：`skill.load` 工具只能让模型"按名加载正文"，
+        # 但模型不知道有哪些技能可加载——那就等于盲猜。参考实现把
+        # "没有引导注入"直接判定为失效集成：技能文件躺在磁盘上，永远不会
+        # 被调用（docs/08 第 6 节）。
+        #
+        # 注入的只有**目录**（小、常驻），正文仍然按需加载（渐进披露）。
+        # 引导措辞是"若相符则先加载"，**不强制**必须调用一次——多一步调用
+        # 在我们的 1–2 步 / 1.1–7.1 秒预算里不划算，判断留给模型。
+        self._skill_brief = skill_brief
         self._on_event = on_event
 
     # ------------------------------------------------------------ 只读属性
@@ -559,6 +571,10 @@ class AgentCore:
     def schema_brief(self) -> str:
         return self._schema_brief
 
+    @property
+    def skill_brief(self) -> str:
+        return self._skill_brief
+
     def available(self) -> bool:
         return bool(self._provider is not None and self._provider.available())
 
@@ -573,6 +589,10 @@ class AgentCore:
     def set_schema_brief(self, brief: str) -> None:
         """更新库表事实（元数据快照刷新后调用）。"""
         self._schema_brief = brief or ""
+
+    def set_skill_brief(self, brief: str) -> None:
+        """更新技能目录（技能在装配期只读加载，这里只是热生效入口）。"""
+        self._skill_brief = brief or ""
 
     def set_on_event(self, cb: Callable[[dict[str, Any]], None] | None) -> None:
         self._on_event = cb
@@ -942,6 +962,14 @@ class AgentCore:
         if self._schema_brief:
             system += ("\n\n## 当前数据源的库表事实（已核对，可直接引用）\n"
                        + self._schema_brief)
+        if self._skill_brief:
+            system += (
+                "\n\n## 可用技能（流程说明，按需加载）\n"
+                "下面每一条描述「某类问题该按什么步骤做」。**如果当前问题与某个"
+                "技能描述相符，下一步应先调用 `skill.load` 加载它**，再按它的步骤"
+                "作答；若没有相符的技能，就按上面的规则直接作答，不要为了加载而加载。\n"
+                + self._skill_brief
+            )
         system += (
             "\n\n可用工具（JSON Schema）：\n"
             + json.dumps(tools_schema, ensure_ascii=False, indent=1)

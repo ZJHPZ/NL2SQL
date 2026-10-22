@@ -12,10 +12,15 @@
 完整设计见 **`../docs/08-技能设计草案.md`**，参考实现对照见
 `../docs/09-参考实现-superpowers.md`。
 
-> **当前状态：机制已通（P0），但本目录还没有技能。**
-> 项目自己的 playbook（口径类流程）计划在 P1 加进来。
-> 在此之前，`skill.load` 工具**不会注册**——没有技能时把它留在
-> 模型清单里只会让它白花一步去试。
+> **当前状态：P0 机制已通，P1 项目 playbook 已加入（3 份）。**
+> `cross-period-comparison`（跨期对比）、`having-vs-group-filter`
+> （HAVING vs 行级过滤）、`unverified-metric-disclosure`（口径未注册时披露）。
+> 有技能时 `skill.load` 才会注册；目录由壳层注入 system prompt（引导注入，
+> 见 `nl2sql/agent/machine.py`）。技能是否真的改变决策，用
+> `scripts/decision_eval.py` 的基线对照实验测（不进 `tests/`）。
+> 实测（2026-10，4 次）：选择 11/12 稳定；正确率差值 −2…+1 在噪声内
+> （场景集偏简单，失败多是步数上限未收敛）——数据在
+> `data/_experiments/decision/`，结论见 `../docs/08-技能设计草案.md` §13。
 
 ## 两种放置方式
 

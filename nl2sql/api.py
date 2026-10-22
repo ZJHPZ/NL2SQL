@@ -424,11 +424,20 @@ class NL2SQL:
         )
         from .agent.factory import make_runtime
 
+        # 技能目录只进**目录**（name + description），正文按需通过 skill.load
+        # 加载。没有技能时为空串，system prompt 与加机制之前逐字相同
+        # （P0 的"机制通了、行为不变"断言仍成立）。
+        skill_brief = ""
+        if self.skill_catalog is not None:
+            skill_brief = self.skill_catalog.catalog_text(
+                source_id=cfg.source_id)
+
         self._runtime, runtime_note = make_runtime(
             self.config.agent.runtime,
             provider=provider, registry=registry, config=run_cfg,
             capabilities=granted,
             schema_brief=self._schema_brief(),
+            skill_brief=skill_brief,
             on_tool_call=self._record_tool_call,
         )
         # 降级要留痕：用户以为在跑图执行器、实际没有，是最难排查的那种沉默
@@ -479,6 +488,9 @@ class NL2SQL:
         cfg.temperature = self.config.agent.temperature
         self._runtime.set_system_prompt(self._load_decision_prompt())
         self._runtime.set_schema_brief(self._schema_brief())
+        if self.skill_catalog is not None:
+            self._runtime.set_skill_brief(self.skill_catalog.catalog_text(
+                source_id=self.config.resolve_source().source_id))
 
     def _load_decision_prompt(self) -> str:
         """加载外置决策 Prompt。读不到时回退内置默认，**但不再静默**。
