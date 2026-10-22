@@ -89,6 +89,25 @@ def test_offline(work: str) -> None:
     ctx = PlannerContext(source_id="shop", now=NOW)
     rule = RulePlanner(model)
 
+    # 0) 默认值：智能体默认开启（2026-10 拍板）；无模型时安全回落线性管线
+    from datetime import date  # 局部导入：只有这条断言依赖"今天"
+
+    cfg0 = NL2SQLConfig(state_dir=os.path.join(work, "s0"))
+    cfg0.add_sqlite(GOLDEN_DB, source_id="shop")
+    check(cfg0.agent.planner == "agent",
+          "默认规划器为 agent（智能体作为项目特色默认开启）",
+          cfg0.agent.planner)
+    with NL2SQL(cfg0, semantic_model=build_model(order_level=True)) as e0:
+        check(e0.planner_mode == "rule(agent 降级：无模型)",
+              "无模型时 agent 安全回落线性管线（不是报错）",
+              e0.planner_mode)
+        # 相对时间必须有锚点：「本月」缺省用服务端当天，而不是静默查全时段。
+        # 曾出过 status=ok 但时间条件被静默丢掉的 quietly wrong（2026-10 修）。
+        out0 = e0.ask("本月各渠道的实收金额分别是多少？")
+        month_start = date.today().strftime("%Y-%m-01")
+        check(bool(out0.ok) and month_start in (out0.sql or ""),
+              "相对时间缺省以服务端当天为锚点", f"sql={out0.sql}")
+
     # 1) 无模型 → 自动降级为 rule
     cfg = NL2SQLConfig(state_dir=os.path.join(work, "s1"))
     cfg.add_sqlite(GOLDEN_DB, source_id="shop")

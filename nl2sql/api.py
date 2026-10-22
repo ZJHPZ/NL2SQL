@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from typing import Any, Callable
 
 from . import __version__
@@ -211,10 +212,12 @@ class NL2SQL:
         """装配查询管线：规划器 + 编译器 + 守门 + 缓存 + 编排。
 
         规划器选择（`config.agent.planner`）：
+            `"agent"`  **默认**：智能体模式；线性管线只作为 `nl2sql.solve`
+                       工具与无模型时的兜底（规划器取 hybrid/rule）
             `"rule"`   确定性规则规划器，零模型依赖
             `"llm"`    模型驱动
-            `"hybrid"` **规则优先 + 模型兜底**（推荐，需注入 provider）
-            `"auto"`   默认：有可用模型则 hybrid，否则 rule
+            `"hybrid"` **规则优先 + 模型兜底**（需注入 provider）
+            `"auto"`   旧默认：有可用模型则 hybrid，否则 rule
 
         hybrid 的依据是实测：规则与模型覆盖不同的题，合并能提升准确率，
         同时把"确定的题"留在零延迟、零成本、可复现的路径上。
@@ -233,9 +236,15 @@ class NL2SQL:
         provider = self.llm_provider or NullLLM()
         llm_ready = bool(provider.available())
 
-        mode = self.config.agent.planner
-        if mode == "auto":
-            # 默认选实测最优：有模型就用 **hybrid（规则优先 + 模型兜底）**。
+        configured_mode = self.config.agent.planner
+        mode = configured_mode
+        if mode == "agent":
+            # 默认模式：线性管线不再是主路径，而是 `nl2sql.solve` 工具与
+            # 无模型时的兜底。它的规划器仍选实测最优的 hybrid（无模型则 rule），
+            # 这样 agent 调 solve 拿到的计划质量与其他模式一致。
+            mode = "hybrid" if llm_ready else "rule"
+        elif mode == "auto":
+            # 旧默认：有模型就用 **hybrid（规则优先 + 模型兜底）**。
             #
             # 依据（S3c 扩容后重测，黄金集 30 题，同一 Key）：
             #
@@ -302,7 +311,7 @@ class NL2SQL:
             max_rows=self.config.safety.max_rows,
             timeout_s=self.config.safety.timeout_s,
         )
-        self._build_agent_runtime(mode, provider, model, adapter, caps)
+        self._build_agent_runtime(configured_mode, provider, model, adapter, caps)
 
     # ------------------------------------------------------------ agent 装配
     def _build_agent_runtime(self, mode: str, provider: Any, model: Any,
@@ -606,7 +615,8 @@ class NL2SQL:
         Args:
             question: 业务问题（自然语言）。
             source_id: 数据源标识；None 用默认数据源。
-            now: 相对时间锚点（ISO 日期）。评测/复现时必须显式传入。
+            now: 相对时间锚点（ISO 日期）。**评测/复现时必须显式传入**，
+                否则相对时间（本月/上月等）会以真实今天为锚点，结果随日期漂移。
             use_cache: 覆盖配置中的缓存开关。
             session_id: 会话标识。**agent 模式（尤其澄清）必须传**，
                 否则下一轮接不上上下文。不传时自动生成单轮会话。
@@ -620,7 +630,10 @@ class NL2SQL:
             这是**正常状态**：智能体在信息不足时选择不猜。
         """
         source_cfg = self.config.resolve_source(source_id)
-        resolved_now = now or self.config.now
+        # 相对时间（本月/上月/昨天）必须有锚点，否则规划器会静默丢掉时间
+        # 条件、把"上个月"答成全时段（实测踩过：status=ok 但口径是错的）。
+        # 优先级：显式参数 > 配置 > 真实今天。评测/复现仍应显式传 now。
+        resolved_now = now or self.config.now or date.today().isoformat()
 
         self.connect()
         if self._agent is None:

@@ -107,14 +107,21 @@ class KnowledgeConfig:
 class AgentConfig:
     graph: str = "default"                 # 注册表中的 GraphSpec 名
     # 规划器模式：
-    #   "auto"             默认。有可用模型则用 llm，否则退化为 rule
-    #   "agent"            **智能体模式**：模型在循环里自主选择工具、
-    #                      看到失败后自我纠正、信息不足时向用户追问
+    #   "agent"            **默认**：智能体模式。模型在循环里自主选择工具、
+    #                      看到失败后自我纠正、信息不足时向用户追问。
+    #                      需要可用模型；没有模型时自动回落线性管线（rule），
+    #                      不会因为没 Key 就启动失败。
+    #   "auto"             旧默认。有可用模型则 hybrid（规则优先+模型兜底），
+    #                      否则 rule —— **没有工具循环**，速度最快、最确定
     #   "hybrid_verified"  规则产出 → 模型验证切题性 → 不通过则模型重做
     #   "hybrid"           规则优先 + 模型只兜底"答不出"（省调用，准确率≈规则）
     #   "rule"             仅确定性规则，零模型依赖
     #   "llm"              仅模型驱动（单次规划，无循环）
-    planner: str = "auto"
+    #
+    # 为什么默认 agent：智能体是本项目的特色能力（自己选工具、看失败重试、
+    # 信息不足时追问而不是瞎编）。代价是每次问答多 1–2 次模型调用、
+    # 耗时从亚秒级变成数秒级；批量/可复现场景可以显式写 "rule" 或 "hybrid"。
+    planner: str = "agent"
     llm: str | None = None                 # 注册表键；None 表示不使用模型
     clarify: bool = True                   # 允许 agent 主动追问（回合制）
     allow_freeform: bool = True            # 语义层未覆盖时是否自由生成（并标注未验证口径）

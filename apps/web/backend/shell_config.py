@@ -73,7 +73,10 @@ class ShellConfig:
     pg_database: str = ""
     state_dir: str = "data"
     source_id: str = "default"
-    planner: str = "auto"
+    # 规划器模式。默认 agent（智能体是本项目特色：自主选工具/看失败重试/
+    # 信息不足时追问）。没有模型时核心会自动回落线性 rule 管线，不会启动失败。
+    # 想要最快最确定的路径可显式设 NL2SQL_PLANNER=rule / hybrid。
+    planner: str = "agent"
     # 智能体执行器：auto / loop / langgraph
     runtime: str = "auto"
     config_path: str = "config/nl2sql.toml"
@@ -107,7 +110,7 @@ def read_env(env: dict[str, str] | None = None) -> ShellConfig:
         pg_database=e.get("NL2SQL_PG_DATABASE", ""),
         state_dir=e.get("NL2SQL_STATE_DIR", "data"),
         source_id=e.get("NL2SQL_SOURCE_ID", "default"),
-        planner=e.get("NL2SQL_PLANNER", "auto"),
+        planner=e.get("NL2SQL_PLANNER", "agent"),
         runtime=(e.get("NL2SQL_RUNTIME", "auto") or "auto").strip().lower(),
         # 运行配置文件的路径**必须可注入**：否则测试之间、以及多份部署
         # 会共用同一个文件，互相覆盖对方的停用清单与能力设置。
