@@ -5011,3 +5011,21 @@ table.grid td.mono {
     font-size: 28px;
   }
 }
+
+/* ---------- v9.1 ---------- */
+/* base 段给 .ws-side 留了固定 300px 宽（老 flex 布局的遗产），v8 起改成
+   240px 网格列后它仍然按 300px 撑开，项目清单会溢出压到右侧项目介绍上。
+   网格子项一律按列宽走，不要再保留固定宽度。 */
+.workspace .ws-side {
+  width: auto;
+  min-width: 0;
+}
+
+.workspace .ws-main {
+  width: auto;
+  min-width: 0;
+}
+
+.workspace .ws-item {
+  width: 100%;
+}
