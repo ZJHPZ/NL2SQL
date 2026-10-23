@@ -19,7 +19,6 @@ import {
   MessageSquareText,
   RefreshCw,
   Search,
-  Sparkles,
   Table2,
   X,
 } from 'lucide-react'
@@ -624,18 +623,11 @@ export default function App() {
 
             <section className="ask-hero">
               <div className="hero-top">
-                <span className="hero-eyebrow">
-                  <Sparkles size={13} aria-hidden="true" />
-                  智能数据问答
-                </span>
-                <span className="meta">自然语言 → SQL → 结果表</span>
+                <h2 className="hero-title">问一句，拿到 SQL 与结果</h2>
                 <span className="spacer" />
                 {info && <div className="env-chips"><EnvChips info={info} /></div>}
               </div>
 
-              <h2 className="hero-title">
-                问一句，拿到 <span className="grad">SQL 与结果</span>
-              </h2>
               <p className="hero-sub">
                 语义层已经覆盖常见指标；结果表可以直接排序、过滤并导出 CSV。
               </p>
