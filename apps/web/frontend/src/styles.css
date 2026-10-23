@@ -795,15 +795,15 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offs
   --sans: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Consolas, monospace;
 
-  /* 字号阶 */
-  --fs-meta: 11.5px;
-  --fs-label: 12.5px;
+  /* 字号阶：整数阶，11 以下只用于装饰（kbd/徽标内小标），正文 14，标题 20/24/28，舞台 40 */
+  --fs-meta: 12px;
+  --fs-label: 13px;
   --fs-body: 14px;
   --fs-md: 15px;
-  --fs-lg: 17px;
+  --fs-lg: 16px;
   --fs-h3: 20px;
   --fs-h2: 24px;
-  --fs-h1: 30px;
+  --fs-h1: 28px;
   --fs-display: 40px;
 
   /* 间距阶 */
@@ -867,6 +867,8 @@ body {
     radial-gradient(1000px 540px at 50% -220px, rgba(120, 150, 255, .10), transparent 62%),
     radial-gradient(760px 420px at 88% -160px, rgba(80, 110, 255, .055), transparent 60%);
   background-repeat: no-repeat;
+  caret-color: var(--accent);
+  accent-color: var(--accent-2);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -882,8 +884,8 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .2); }
 
-h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -.02em; }
-p { margin: 0; }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -.02em; text-wrap: balance; }
+p { margin: 0; text-wrap: pretty; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 button { font-family: inherit; }
@@ -891,7 +893,7 @@ input, select, textarea { font-family: inherit; }
 input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(.65); cursor: pointer; }
 
 :focus-visible {
-  outline: 2px solid var(--accent-line);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--r-xs);
 }
@@ -953,10 +955,9 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(.65); cur
   display: inline-flex; align-items: center; justify-content: center;
   width: 32px; height: 32px; flex: 0 0 auto;
   border-radius: var(--r-sm);
-  background: linear-gradient(160deg, #1b2233, #0d1017);
+  background: var(--surface-2);
   border: 1px solid var(--line);
   color: var(--accent);
-  box-shadow: var(--shadow-card);
 }
 .brand-text { display: flex; flex-direction: column; min-width: 0; }
 .brand-name {
@@ -1393,12 +1394,8 @@ kbd {
 }
 .answer-title {
   display: inline-flex; align-items: center; gap: 8px;
-  font-size: var(--fs-label); font-weight: 600; letter-spacing: 0;
+  font-size: var(--fs-label); font-weight: 600; letter-spacing: .01em;
   color: var(--text-2);
-}
-.answer-title::before {
-  content: ""; width: 3px; height: 13px; border-radius: 2px;
-  background: var(--accent);
 }
 .answer-head .meta { font-size: var(--fs-meta); color: var(--text-2); }
 .answer-body { color: #dbe1ee; font-size: var(--fs-md); line-height: 1.75; }
@@ -2004,4 +2001,81 @@ table.grid .rownum { width: 44px; color: var(--text-3); font-family: var(--mono)
   .recent-chip { max-width: 100%; }
   .ws-main { padding: var(--s4); }
   .field-grid { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   v6 精修（2026-10-23）：impeccable「Operate」模式审查后的收口
+   只做收敛，不换方向：去掉装饰性强调、统一字阶与节奏、补齐浏览器表面。
+   - 编辑感来自留白与层级，不来自色块、彩条、投影堆叠。
+   - 单一 elevation：主查询框只靠 1px 线与聚焦光环，不叠大投影。
+   - 空态按「标题→副题→大框→示例索引」的节奏排间距。
+   ============================================================ */
+
+/* 舞台：间距节奏（标题紧、主体松、索引收尾） */
+.stage-inner { gap: 0; max-width: 820px; }
+.stage-inner > .stage-title { margin-bottom: 10px; }
+.stage-inner > .stage-sub { margin-bottom: var(--s7); max-width: 46ch; }
+.stage-inner > .askbar.composer { margin-bottom: var(--s6); }
+.stage-inner > .example-grid { margin-bottom: var(--s5); }
+.stage-inner > .stage-recent { margin-bottom: var(--s3); }
+.stage-inner > .stage-links { margin-bottom: var(--s4); }
+.stage-inner > .stage-note { margin-bottom: 0; }
+.stage-inner > .alert { width: 100%; text-align: left; margin-bottom: var(--s5); }
+.stage-inner > .tables-panel { width: 100%; text-align: left; margin-top: var(--s5); }
+.stage-title { letter-spacing: -.02em; }
+
+/* 示例问题：编辑式索引行（hairline 行，不再是小卡片墙） */
+.example-grid { column-gap: var(--s6); row-gap: 0; }
+.example-card {
+  padding: var(--s3) 0;
+  background: transparent;
+  border: 0; border-top: 1px solid var(--line-soft); border-radius: 0;
+  font-size: var(--fs-label); color: var(--text-2);
+  transform: none;
+}
+.example-card:hover {
+  background: transparent; border-color: var(--line-soft);
+  color: var(--text); transform: none;
+}
+.example-card:hover .example-arrow { color: var(--accent); transform: translate(1px, -1px); }
+.example-arrow { transition: color var(--dur) var(--ease), transform var(--dur) var(--ease); }
+
+/* 主查询框：单一 elevation——线 + 聚焦光环，不叠大投影 */
+.askbar.composer {
+  border-radius: var(--r-lg);
+  box-shadow: none;
+}
+.askbar.composer:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.composer-main { gap: var(--s3); padding: 13px 12px 9px 20px; }
+.composer-main .ask-input { font-size: var(--fs-lg); letter-spacing: -.005em; }
+.composer-foot { padding: 0 20px 13px; }
+
+/* 正文可读宽度：结论文本按中文约 40–45 字/行收口，不横贯整卡 */
+.answer-body { max-width: 74ch; text-wrap: pretty; }
+.md p, .stage-sub, .work-empty-hint, .empty-hint { text-wrap: pretty; }
+
+/* 结果区节奏：卡与卡之间收紧但不糊成一片 */
+.work { gap: var(--s5); }
+
+/* 表格：更安静的头部与行悬停，数字右对齐 + tabular */
+table.grid thead th {
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+table.grid td { padding: 10px 14px; }
+table.grid tbody tr:hover td { background: var(--surface-1); }
+
+/* 引用块/修订标记：去掉超过 1px 的彩色竖线 */
+.md blockquote { border-left-width: 1px; }
+.rev-item.rev-ai { border-left-width: 1px; }
+
+/* 浏览器表面：光标、滚动条、选择行为都从调色板取色 */
+* { scrollbar-color: rgba(255, 255, 255, .14) transparent; scrollbar-width: thin; }
+
+@media (max-width: 1360px) {
+  .stage-title { font-size: 36px; }
 }

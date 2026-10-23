@@ -847,9 +847,7 @@ export default function App() {
                           <div className="answer-head">
                             <span className="answer-title">结论</span>
                             <span className="spacer" />
-                            <span className="meta">
-                              智能体的自然语言回答；下方结果表是同一份数据的明细
-                            </span>
+                            <span className="meta">自然语言结论 · 明细见下方结果表</span>
                           </div>
                           <Markdown className="answer-body" text={data.answer} />
                         </div>
