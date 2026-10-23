@@ -264,6 +264,9 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [tables, setTables] = useState<TableInfo[]>([])
   const [showTables, setShowTables] = useState(false)
+  // 空态「舞台」与工作区之间切换：点「历史/知识库/插件/表结构」时把侧栏面板打开，
+  // 舞台收起；开始查询或新会话时自动收起面板、回到舞台。
+  const [panelsOpen, setPanelsOpen] = useState(false)
 
   const [kbItems, setKbItems] = useState<KnowledgeItem[]>([])
   const [kbHits, setKbHits] = useState<KnowledgeHit[] | null>(null)
@@ -355,6 +358,7 @@ export default function App() {
       setSessionId(null)
       setReqError(null)
       setShowTables(false)
+      setPanelsOpen(false)
       // 历史 / 表结构 / 知识库都是项目维度（请求带 X-Project-Id），换项目后重拉
       void reloadSide()
     },
@@ -375,6 +379,7 @@ export default function App() {
     setReqError(null)
     setStages([])
     setElapsedMs(0)
+    setPanelsOpen(false)
 
     // 本地数组累积后再整体 set：避免连续事件下多次浅拷贝打断 React 批处理
     const local: StageStep[] = []
@@ -453,6 +458,8 @@ export default function App() {
     setData(null)
     setQuestion('')
     setReqError(null)
+    setStages([])
+    setPanelsOpen(false)
   }
 
   const rerunSql = async (sql: string) => {
@@ -503,6 +510,109 @@ export default function App() {
     await api.refreshCache()
     void reloadSide()
   }
+
+  // ---------------------------------------------------------------- 渲染片段
+  // 舞台模式：问答页没有结果、没在查询、也没有手动打开侧栏时，显示居中的大提问舞台。
+  const stageMode = view === 'ask' && !data && !busy && !panelsOpen
+
+  const engineAlert =
+    info && info.engine_ready === false ? (
+      <div className="alert alert-bad boot-fail">
+        <strong>核心引擎没有装配成功</strong>
+        {info.startup_warnings.length > 0 ? (
+          <ul className="tight">
+            {info.startup_warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        ) : (
+          <div>没有更多信息，请查看服务端启动日志。</div>
+        )}
+        <div className="meta">
+          常见原因：数据源文件路径不对、dbt 指标文件（NL2SQL_METRICS /
+          semantic_path）不存在或写错了。
+        </div>
+      </div>
+    ) : null
+
+  // 提问框在「舞台」与「工作区」复用；紧凑模式由 .composer-compact 收窄。
+  const composer = (
+    <div className={stageMode ? 'askbar composer' : 'askbar composer composer-compact'}>
+      <label className="visually-hidden" htmlFor="ask-input">自然语言问题</label>
+      <div className="composer-main">
+        <span className="composer-icon" aria-hidden="true">
+          <Search size={18} />
+        </span>
+        <input
+          id="ask-input"
+          className="ask-input"
+          value={question}
+          placeholder={
+            stageMode
+              ? '用自然语言问一句，例如：2024 年 5 月各渠道的实收金额分别是多少？'
+              : '继续问一句，或直接回车重跑当前问题…'
+          }
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              void runQuery()
+            }
+          }}
+        />
+        {busy ? (
+          <button className="btn btn-cancel btn-lg" onClick={cancelQuery}
+                  title="取消本次查询（后端线程仍会跑完，结果不再进入界面）">
+            <X size={15} aria-hidden="true" />
+            取消
+          </button>
+        ) : (
+          <button className="btn btn-primary btn-lg" disabled={!question.trim()}
+                  onClick={() => void runQuery()}>
+            <Search size={15} aria-hidden="true" />
+            查询
+          </button>
+        )}
+      </div>
+      <div className="composer-foot">
+        <label className="nowfield" htmlFor="now-input"
+               title="相对时间锚点：让「本月/上月」有确定含义，且可复现">
+          时间锚点
+          <input id="now-input" value={now} onChange={(e) => setNow(e.target.value)} />
+        </label>
+        <span className="composer-hint">Enter 直接查询 · 结果可导出</span>
+      </div>
+    </div>
+  )
+
+  // 表结构面板在舞台与工作区两种布局下复用
+  const tablesPanel = showTables ? (
+    <div className="tables-panel">
+      {tables.map((t) => (
+        <div className="table-card" key={t.name}>
+          <div className="table-card-head">
+            <b className="mono">{t.name}</b>
+            <span className="meta">
+              {t.row_estimate ?? '?'} 行 · {t.column_count} 列
+            </span>
+          </div>
+          <div className="chips">
+            {t.columns.map((c) => (
+              <span
+                className="chip mono"
+                key={c.name}
+                title={`${c.data_type}${c.is_primary_key ? ' · 主键' : ''}${
+                  c.generated ? ' · 生成列' : ''
+                }`}
+              >
+                {c.name}
+                {c.is_primary_key && ' 🔑'}
+                {c.generated && ' ƒ'}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  ) : null
 
   // ---------------------------------------------------------------- 渲染
   if (bootError) {
@@ -600,74 +710,22 @@ export default function App() {
       {view === 'ask' && (
         <main id="main-content" className="ask-main" aria-busy={busy}>
           <h1 className="visually-hidden">talk-to-sql 查询工作台</h1>
-          <div className="page">
-            {/* 引擎装配失败：必须把**原因原文**摆出来。
-                早先这种情况只显示"核心引擎未就绪"，用户完全不知道是哪个文件写错了
-                （比如 dbt 指标文件路径写错），只能去翻服务端日志。 */}
-            {info && info.engine_ready === false && (
-              <div className="alert alert-bad boot-fail">
-                <strong>核心引擎没有装配成功</strong>
-                {info.startup_warnings.length > 0 ? (
-                  <ul className="tight">
-                    {info.startup_warnings.map((w, i) => <li key={i}>{w}</li>)}
-                  </ul>
-                ) : (
-                  <div>没有更多信息，请查看服务端启动日志。</div>
-                )}
-                <div className="meta">
-                  常见原因：数据源文件路径不对、dbt 指标文件（NL2SQL_METRICS /
-                  semantic_path）不存在或写错了。
-                </div>
-              </div>
-            )}
 
-            <section className="ask-hero">
-              <div className="hero-top">
-                <h2 className="hero-title">问一句，拿到 SQL 与结果</h2>
-                <span className="spacer" />
-                {info && <div className="env-chips"><EnvChips info={info} /></div>}
-              </div>
+          {stageMode ? (
+            <section className="stage page-stage" aria-label="提问">
+              <div className="stage-inner">
+                {engineAlert}
 
-              <p className="hero-sub">
-                语义层已经覆盖常见指标；结果表可以直接排序、过滤并导出 CSV。
-              </p>
+                <h2 className="hero-title stage-title">
+                  问一句，拿到 <span className="stage-accent">SQL 与结果</span>
+                </h2>
+                <p className="hero-sub stage-sub">
+                  语义层已覆盖常见指标与口径；结果表可排序、过滤并导出 CSV。
+                  无法解析时会明确告诉你，而不是编一条看起来对的 SQL。
+                </p>
 
-              <div className="askbar">
-                <label className="visually-hidden" htmlFor="ask-input">自然语言问题</label>
-                <input
-                  id="ask-input"
-                  className="ask-input"
-                  value={question}
-                  placeholder="用自然语言问一句，例如：2024年6月，数码品类的实收金额是多少？"
-                  onChange={(e) => setQuestion(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      void runQuery()
-                    }
-                  }}
-                />
-                <label className="nowfield" htmlFor="now-input"
-                       title="相对时间锚点：让「本月/上月」有确定含义，且可复现">
-                  时间锚点
-                  <input id="now-input" value={now} onChange={(e) => setNow(e.target.value)} />
-                </label>
-                {busy ? (
-                  <button className="btn btn-cancel btn-lg" onClick={cancelQuery}
-                          title="取消本次查询（后端线程仍会跑完，结果不再进入界面）">
-                    <X size={15} aria-hidden="true" />
-                    取消
-                  </button>
-                ) : (
-                  <button className="btn btn-primary btn-lg" disabled={!question.trim()}
-                          onClick={() => void runQuery()}>
-                    <Search size={15} aria-hidden="true" />
-                    查询
-                  </button>
-                )}
-              </div>
+                {composer}
 
-              {!data && !busy && (
                 <ul className="example-grid">
                   {EXAMPLES.map((q) => (
                     <li key={q}>
@@ -678,159 +736,186 @@ export default function App() {
                     </li>
                   ))}
                 </ul>
+
+                {history.length > 0 && (
+                  <div className="stage-recent">
+                    <span className="stage-recent-label">最近问过</span>
+                    {history.slice(0, 5).map((h, i) => (
+                      <button
+                        key={`${h.question}-${i}`}
+                        className="recent-chip"
+                        onClick={() => restore(h)}
+                        title={h.question}
+                      >
+                        {h.question}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="stage-links">
+                  <button className="linkbtn" onClick={() => setPanelsOpen(true)}>
+                    历史与知识库
+                  </button>
+                  <button className="linkbtn" onClick={() => setShowTables((v) => !v)}>
+                    {showTables ? '收起表结构' : '查看表结构'}
+                  </button>
+                  <button className="linkbtn" onClick={() => setView('projects')}>
+                    项目管理
+                  </button>
+                  <button className="linkbtn" onClick={() => setView('tasks')}>
+                    SQL 任务
+                  </button>
+                </div>
+
+                <p className="stage-note">
+                  首字节平均几十毫秒 · 流式展示每一步工具调用 · 全程可取消
+                </p>
+
+                {tablesPanel}
+              </div>
+            </section>
+          ) : (
+            <div className="page">
+              {engineAlert}
+
+              <div className="work-top">
+                {composer}
+                {(data || panelsOpen) && (
+                  <button
+                    className="btn btn-ghost btn-sm work-top-close"
+                    onClick={() => {
+                      setData(null)
+                      setPanelsOpen(false)
+                    }}
+                    title="回到提问舞台"
+                  >
+                    返回提问
+                  </button>
+                )}
+              </div>
+
+              {reqError && (
+                <div className="alert alert-bad" role="alert">
+                  {reqError}
+                </div>
               )}
 
-              <p className="hero-note">
-                提示：无法解析时工具会明确说「未能理解」，而不会编一条看起来对的 SQL。
-              </p>
-            </section>
+              {tablesPanel}
 
-            {reqError && (
-              <div className="alert alert-bad" role="alert">
-                {reqError}
-              </div>
-            )}
-
-            {showTables && (
-              <div className="tables-panel">
-                {tables.map((t) => (
-                  <div className="table-card" key={t.name}>
-                    <div className="table-card-head">
-                      <b className="mono">{t.name}</b>
-                      <span className="meta">
-                        {t.row_estimate ?? '?'} 行 · {t.column_count} 列
-                      </span>
-                    </div>
-                    <div className="chips">
-                      {t.columns.map((c) => (
-                        <span
-                          className="chip mono"
-                          key={c.name}
-                          title={`${c.data_type}${c.is_primary_key ? ' · 主键' : ''}${
-                            c.generated ? ' · 生成列' : ''
-                          }`}
-                        >
-                          {c.name}
-                          {c.is_primary_key && ' 🔑'}
-                          {c.generated && ' ƒ'}
-                        </span>
-                      ))}
-                    </div>
+              <div className="content-grid">
+                <section className="work" aria-label="查询结果">
+                  {/* 屏幕阅读器播报：视觉进度条本身 aria-live，但结果状态也要读出来 */}
+                  <div className="visually-hidden" role="status" aria-live="polite">
+                    {busy
+                      ? '正在查询'
+                      : data
+                        ? `查询完成：${OUTCOME_LABEL[data.status] ?? data.status}`
+                        : ''}
                   </div>
-                ))}
-              </div>
-            )}
 
-            <div className="content-grid">
-              <section className="work" aria-label="查询结果">
-                {/* 屏幕阅读器播报：视觉进度条本身 aria-live，但结果状态也要读出来 */}
-                <div className="visually-hidden" role="status" aria-live="polite">
-                  {busy
-                    ? '正在查询'
-                    : data
-                      ? `查询完成：${OUTCOME_LABEL[data.status] ?? data.status}`
-                      : ''}
-                </div>
-
-                {busy && (
-                  <div className="stream-box">
-                    <StreamTimeline steps={stages} elapsedMs={elapsedMs} />
-                    {!data && <QuerySkeleton />}
-                  </div>
-                )}
-
-                {!busy && stages.length > 0 && (
-                  <details className="stream-done">
-                    <summary>
-                      执行过程（{stages.length} 步 · {(elapsedMs / 1000).toFixed(1)}s）
-                    </summary>
-                    <StreamTimeline steps={stages} elapsedMs={elapsedMs} compact />
-                  </details>
-                )}
-
-                {!data && !busy && (
-                  <div className="work-empty">
-                    <div className="work-empty-title">结果会出现在这里</div>
-                    <div className="work-empty-hint">
-                      顶部提问，或点一个示例问题。结果包含结论、可编辑 SQL 与明细表。
+                  {busy && (
+                    <div className="stream-box">
+                      <StreamTimeline steps={stages} elapsedMs={elapsedMs} />
+                      {!data && <QuerySkeleton />}
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {data && (
-                  <>
-                    <StatusBar data={data} onPickOption={answerClarification} />
-                    {data.answer && (
-                      <div className="answer">
-                        <div className="answer-head">
-                          <span className="answer-title">结论</span>
-                          <span className="spacer" />
-                          <span className="meta">
-                            智能体的自然语言回答；下方结果表是同一份数据的明细
-                          </span>
-                        </div>
-                        <Markdown className="answer-body" text={data.answer} />
+                  {!busy && stages.length > 0 && (
+                    <details className="stream-done">
+                      <summary>
+                        执行过程（{stages.length} 步 · {(elapsedMs / 1000).toFixed(1)}s）
+                      </summary>
+                      <StreamTimeline steps={stages} elapsedMs={elapsedMs} compact />
+                    </details>
+                  )}
+
+                  {!data && !busy && (
+                    <div className="work-empty">
+                      <div className="work-empty-title">结果会出现在这里</div>
+                      <div className="work-empty-hint">
+                        顶部提问，或回到舞台点一个示例问题。结果包含结论、可编辑 SQL 与明细表。
                       </div>
-                    )}
-                    <SqlPanel sql={data.sql} onRerun={rerunSql} busy={busy} />
-                    {data.result ? (
-                      <ResultTable result={data.result} />
-                    ) : (
-                      data.status !== 'need_clarification' && (
-                        <div className="empty-block">
-                          <div className="empty-title">
-                            {data.status === 'unresolved'
-                              ? '没能把这个问题映射到语义层'
-                              : '本次没有可展示的结果表'}
-                          </div>
-                          <div className="empty-hint">
-                            {data.status === 'unresolved'
-                              ? '看上方提示里的建议——工具不会用一条看起来合理但答非所问的 SQL 来掩盖它没听懂。'
-                              : '上方结论里可能已经有答案；没有结果表说明这次没有可结构化的数据。'}
-                          </div>
-                        </div>
-                      )
-                    )}
-                  </>
-                )}
-              </section>
+                    </div>
+                  )}
 
-              <aside className="side">
-                <div className="tabs">
-                  <button
-                    className={tab === 'history' ? 'tab active' : 'tab'}
-                    onClick={() => setTab('history')}
-                  >
-                    历史 <span className="meta">{history.length}</span>
-                  </button>
-                  <button
-                    className={tab === 'knowledge' ? 'tab active' : 'tab'}
-                    onClick={() => setTab('knowledge')}
-                  >
-                    知识库 <span className="meta">{kbItems.length}</span>
-                  </button>
-                  <button
-                    className={tab === 'admin' ? 'tab active' : 'tab'}
-                    onClick={() => setTab('admin')}
-                    title="插件、工具、能力与运行参数"
-                  >
-                    插件与工具
-                  </button>
-                </div>
-                {tab === 'history' && <HistoryPanel items={history} onRestore={restore} />}
-                {tab === 'knowledge' && (
-                  <KnowledgePanel
-                    items={kbItems}
-                    hits={kbHits}
-                    onTest={testKnowledge}
-                    onToggle={toggleKnowledge}
-                    busy={busy}
-                  />
-                )}
-                {tab === 'admin' && <PluginAdminPanel />}
-              </aside>
+                  {data && (
+                    <>
+                      <StatusBar data={data} onPickOption={answerClarification} />
+                      {data.answer && (
+                        <div className="answer">
+                          <div className="answer-head">
+                            <span className="answer-title">结论</span>
+                            <span className="spacer" />
+                            <span className="meta">
+                              智能体的自然语言回答；下方结果表是同一份数据的明细
+                            </span>
+                          </div>
+                          <Markdown className="answer-body" text={data.answer} />
+                        </div>
+                      )}
+                      <SqlPanel sql={data.sql} onRerun={rerunSql} busy={busy} />
+                      {data.result ? (
+                        <ResultTable result={data.result} />
+                      ) : (
+                        data.status !== 'need_clarification' && (
+                          <div className="empty-block">
+                            <div className="empty-title">
+                              {data.status === 'unresolved'
+                                ? '没能把这个问题映射到语义层'
+                                : '本次没有可展示的结果表'}
+                            </div>
+                            <div className="empty-hint">
+                              {data.status === 'unresolved'
+                                ? '看上方提示里的建议——工具不会用一条看起来合理但答非所问的 SQL 来掩盖它没听懂。'
+                                : '上方结论里可能已经有答案；没有结果表说明这次没有可结构化的数据。'}
+                            </div>
+                          </div>
+                        )
+                      )}
+                    </>
+                  )}
+                </section>
+
+                <aside className="side">
+                  <div className="tabs">
+                    <button
+                      className={tab === 'history' ? 'tab active' : 'tab'}
+                      onClick={() => setTab('history')}
+                    >
+                      历史 <span className="meta">{history.length}</span>
+                    </button>
+                    <button
+                      className={tab === 'knowledge' ? 'tab active' : 'tab'}
+                      onClick={() => setTab('knowledge')}
+                    >
+                      知识库 <span className="meta">{kbItems.length}</span>
+                    </button>
+                    <button
+                      className={tab === 'admin' ? 'tab active' : 'tab'}
+                      onClick={() => setTab('admin')}
+                      title="插件、工具、能力与运行参数"
+                    >
+                      插件与工具
+                    </button>
+                  </div>
+                  <div className="side-panel">
+                    {tab === 'history' && <HistoryPanel items={history} onRestore={restore} />}
+                    {tab === 'knowledge' && (
+                      <KnowledgePanel
+                        items={kbItems}
+                        hits={kbHits}
+                        onTest={testKnowledge}
+                        onToggle={toggleKnowledge}
+                        busy={busy}
+                      />
+                    )}
+                    {tab === 'admin' && <PluginAdminPanel />}
+                  </div>
+                </aside>
+              </div>
             </div>
-          </div>
+          )}
         </main>
       )}
 
