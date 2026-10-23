@@ -44,6 +44,7 @@ import { PluginAdminPanel } from './components/PluginAdminPanel'
 import { ProjectSwitcher } from './components/ProjectSwitcher'
 import { ProjectsPanel } from './components/ProjectsPanel'
 import { TasksPanel } from './components/TasksPanel'
+import { AgentDock } from './components/AgentDock'
 
 type SideTab = 'history' | 'knowledge' | 'admin'
 
@@ -504,6 +505,19 @@ export default function App() {
     setStages([])
     setPanelsOpen(false)
   }
+
+  /** 把随行智能体的结果送回工作台：抽屉里看结论，完整明细在这里看。 */
+  const openDockResult = useCallback((resp: QueryResponse) => {
+    setData(resp)
+    setView('ask')
+    setQuestion(resp.question)
+    setReqError(null)
+    setStages([])
+    setElapsedMs(resp.elapsed_ms ?? 0)
+    setPanelsOpen(false)
+    setShowTables(false)
+    if (resp.session_id) setSessionId(resp.session_id)
+  }, [])
 
   const rerunSql = async (sql: string) => {
     if (busy) return
@@ -1150,6 +1164,14 @@ export default function App() {
           </div>
         </main>
       )}
+
+        <AgentDock
+          projectId={enteredProjectId ?? projectId}
+          projectName={enteredProject?.name ?? projects.find((p) => p.id === projectId)?.name}
+          sourceId={info?.default_source ?? null}
+          now={now}
+          onOpenInWorkbench={openDockResult}
+        />
       </div>
     </div>
   )
