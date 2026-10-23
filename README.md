@@ -550,13 +550,14 @@ python tests/test_m7_projects_api.py    # 项目/数据源/任务 HTTP 契约
 #     查询走 SSE：连上即返回进度（实测首反馈 ~70ms，之前要等 2.4–3.9s），
 #     时间线显示「连接→选工具→执行→整理」；可随时取消；结论按 Markdown 渲染；
 #     首轮有骨架屏；键盘可达（skip link / 焦点环 / aria-live）——axe 四态 0 违规。
-#     视觉为 v5「Obsidian 工作台」：深色编辑感 + 大留白，空态是居中舞台
-#     （大标题/大查询框/示例索引/最近历史），有结果后收为紧凑查询框 + 结果工作区；
-#     层级用三档半透明细线，主查询框只靠 1px 线与聚焦光环（v6 起不再叠投影）；
-#     字号/间距/圆角全部 token 化（整数字阶），自托管 IBM Plex Sans + JetBrains Mono；
-#     1280/900/520 三档无横向溢出。v6 另按 impeccable skill 收口细节：示例问题
-#     改编辑式 hairline 索引行、去彩色竖条/渐变标/ghost-card，补 caret/selection/
-#     滚动条/实色焦点环等浏览器表面。
+#     视觉为 v8「实验记录本 · 暖纸墨线」（按 impeccable skill 重设计）：暖纸底 +
+#     墨字 + 1px 发丝线，左侧 236px 记录索引 rail（01–03 导航/版本/会话），主列
+#     56px 顶栏 + 带 gutter 编号的记录页；三字体分工（IBM Plex Serif 标题 /
+#     IBM Plex Sans 正文 / JetBrains Mono 编号与数据），空态是 serif 44px 标题 +
+#     墨边查询框 + A1–A4 横线示例索引，结果区按「KPI 脚注 → 结论 → SQL 证据 →
+#     结果表」排；语义色只剩橄榄（active）与朱红（错误），无渐变/无玻璃/无重投影，
+#     圆角 2–8px。token 化 + 1280/900/520 三档无横向溢出，axe 四态 0 违规；
+#     设计系统与纪律见 DESIGN.md，方向契约见 .impeccable/surfaces/。
 #     验证：起界面后点「查询」观察进度逐步出现，中途点「取消」应立即恢复；
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx' 后问题才有真实模型结论（离线时用规则规划器）。
 

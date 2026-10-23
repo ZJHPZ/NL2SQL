@@ -1,0 +1,5 @@
+# 本地生成的方向轮 / 评审证据：不随仓库分发（可重跑生成）
+review/
+questions/
+mocks/
+build/

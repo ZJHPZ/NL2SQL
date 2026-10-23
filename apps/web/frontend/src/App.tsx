@@ -629,20 +629,105 @@ export default function App() {
       <a className="skip-link" href="#main-content">
         跳到主内容
       </a>
-      <header className="topbar">
-        <div className="topbar-inner">
-          <div className="brand">
-            <span className="brand-mark" aria-hidden="true">
-              <Database size={15} />
+
+      <aside className="rail" aria-label="工作台导航">
+        <div className="rail-brand">
+          <span className="brand-mark" aria-hidden="true">
+            <Database size={15} />
+          </span>
+          <span className="brand-text">
+            <span className="brand-name">talk-to-sql</span>
+            <span className="brand-sub">数据问答与开发工作台</span>
+          </span>
+        </div>
+
+        <nav className="rail-nav" aria-label="主导航">
+          {VIEWS.map((v, i) => {
+            const Icon = VIEW_ICONS[v.id]
+            return (
+              <button
+                key={v.id}
+                className={view === v.id ? 'navbtn active' : 'navbtn'}
+                onClick={() => setView(v.id)}
+                aria-current={view === v.id ? 'page' : undefined}
+              >
+                <span className="nav-index mono" aria-hidden="true">
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+                <Icon size={15} aria-hidden="true" />
+                <span className="nav-label">{v.label}</span>
+              </button>
+            )
+          })}
+        </nav>
+
+        <div className="rail-foot">
+          {info && <span className="badge badge-soft mono">v{info.version}</span>}
+          {sessionId && (
+            <span className="env-chip session-chip" title={`当前会话 ${sessionId}`}>
+              会话 <b className="mono">{sessionId.slice(0, 6)}</b>
             </span>
-            <span className="brand-text">
-              <span className="brand-name">talk-to-sql</span>
-              <span className="brand-sub">数据问答与开发工作台</span>
+          )}
+          {info && (
+            <span className="rail-env mono">
+              {info.default_source ?? '数据库'} · {info.safety.read_only ? '只读' : '可写'}
             </span>
-            {info && <span className="badge badge-soft mono">v{info.version}</span>}
+          )}
+        </div>
+      </aside>
+
+      <div className="app-main">
+        <header className="topbar">
+          <div className="topbar-inner">
+            <div className="topbar-context">
+              <span className="topbar-kicker mono" aria-hidden="true">
+                {view === 'ask' ? '记录 01' : view === 'projects' ? '记录 02' : '记录 03'}
+              </span>
+              <span className="topbar-label">{VIEWS.find((v) => v.id === view)?.label}</span>
+            </div>
+
+            <span className="spacer" />
+
+            <ProjectSwitcher
+              projectId={projectId}
+              projects={projects}
+              defaultProjectId={defaultProjectId}
+              loading={projectsLoading}
+              error={projectsError}
+              onChange={switchProject}
+              onReload={() => void loadProjects()}
+            />
+
+            <div className="topbar-actions">
+              <button
+                className="btn btn-icon"
+                onClick={newSession}
+                title="清空当前会话，开始新的对话（旧上下文不再带入）"
+                aria-label="新会话"
+              >
+                <MessageSquarePlus size={16} aria-hidden="true" />
+              </button>
+              <button
+                className={showTables ? 'btn btn-icon active' : 'btn btn-icon'}
+                onClick={() => setShowTables((v) => !v)}
+                aria-expanded={showTables}
+                title="查看表结构"
+                aria-label="查看表结构"
+              >
+                <Table2 size={16} aria-hidden="true" />
+              </button>
+              <button
+                className="btn btn-icon"
+                onClick={refreshAll}
+                title="刷新元数据快照并清空结果缓存"
+                aria-label="刷新快照与缓存"
+              >
+                <RefreshCw size={16} aria-hidden="true" />
+              </button>
+            </div>
           </div>
 
-          <nav className="topnav" aria-label="主导航">
+          <nav className="topnav" aria-label="主导航（紧凑）">
             {VIEWS.map((v) => {
               const Icon = VIEW_ICONS[v.id]
               return (
@@ -658,54 +743,7 @@ export default function App() {
               )
             })}
           </nav>
-
-          <span className="spacer" />
-
-          {sessionId && (
-            <span className="env-chip session-chip" title={`当前会话 ${sessionId}`}>
-              会话 <b className="mono">{sessionId.slice(0, 6)}</b>
-            </span>
-          )}
-
-          <ProjectSwitcher
-            projectId={projectId}
-            projects={projects}
-            defaultProjectId={defaultProjectId}
-            loading={projectsLoading}
-            error={projectsError}
-            onChange={switchProject}
-            onReload={() => void loadProjects()}
-          />
-
-          <div className="topbar-actions">
-            <button
-              className="btn btn-icon"
-              onClick={newSession}
-              title="清空当前会话，开始新的对话（旧上下文不再带入）"
-              aria-label="新会话"
-            >
-              <MessageSquarePlus size={16} aria-hidden="true" />
-            </button>
-            <button
-              className={showTables ? 'btn btn-icon active' : 'btn btn-icon'}
-              onClick={() => setShowTables((v) => !v)}
-              aria-expanded={showTables}
-              title="查看表结构"
-              aria-label="查看表结构"
-            >
-              <Table2 size={16} aria-hidden="true" />
-            </button>
-            <button
-              className="btn btn-icon"
-              onClick={refreshAll}
-              title="刷新元数据快照并清空结果缓存"
-              aria-label="刷新快照与缓存"
-            >
-              <RefreshCw size={16} aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-      </header>
+        </header>
 
       {view === 'ask' && (
         <main id="main-content" className="ask-main" aria-busy={busy}>
@@ -713,14 +751,20 @@ export default function App() {
 
           {stageMode ? (
             <section className="stage page-stage" aria-label="提问">
+              <span className="gutter-tag mono" aria-hidden="true">
+                01
+              </span>
               <div className="stage-inner">
                 {engineAlert}
 
                 <h2 className="hero-title stage-title">
-                  问一句，拿到 <span className="stage-accent">SQL 与结果</span>
+                  问一句，拿到可核对的 <span className="stage-accent">SQL 与结果</span>
                 </h2>
                 <p className="hero-sub stage-sub">
-                  语义层已覆盖常见指标与口径；结果表可排序、过滤并导出 CSV。
+                  {info?.semantic?.source
+                    ? `语义层已覆盖 ${info.semantic.metrics ?? 0} 个指标与口径；`
+                    : ''}
+                  结果表可排序、过滤并导出 CSV。
                   无法解析时会明确告诉你，而不是编一条看起来对的 SQL。
                 </p>
 
@@ -777,6 +821,9 @@ export default function App() {
             </section>
           ) : (
             <div className="page">
+              <span className="gutter-tag mono" aria-hidden="true">
+                01
+              </span>
               {engineAlert}
 
               <div className="work-top">
@@ -920,6 +967,9 @@ export default function App() {
       {view === 'projects' && (
         <main id="main-content" className="main">
           <div className="page">
+            <span className="gutter-tag mono" aria-hidden="true">
+              02
+            </span>
             <div className="page-head">
               <div>
                 <h1 className="page-title">项目管理与数据源</h1>
@@ -942,6 +992,9 @@ export default function App() {
       {view === 'tasks' && (
         <main id="main-content" className="main">
           <div className="page">
+            <span className="gutter-tag mono" aria-hidden="true">
+              03
+            </span>
             <div className="page-head">
               <div>
                 <h1 className="page-title">SQL 任务</h1>
@@ -959,6 +1012,7 @@ export default function App() {
           </div>
         </main>
       )}
+      </div>
     </div>
   )
 }

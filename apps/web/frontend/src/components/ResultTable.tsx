@@ -107,6 +107,7 @@ export function ResultTable({ result }: { result: ResultPayload }) {
         <input
           className="filter-input"
           placeholder="在结果中过滤…"
+          aria-label="在结果中过滤"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
@@ -133,9 +134,24 @@ export function ResultTable({ result }: { result: ResultPayload }) {
               {result.columns.map((c, i) => (
                 <th
                   key={i}
+                  scope="col"
                   className={numericCols[i] ? 'num sortable' : 'sortable'}
                   onClick={() => toggleSort(i)}
-                  title="点击排序"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      toggleSort(i)
+                    }
+                  }}
+                  tabIndex={0}
+                  aria-sort={
+                    sort?.col === i
+                      ? sort.desc
+                        ? 'descending'
+                        : 'ascending'
+                      : 'none'
+                  }
+                  title="点击或按回车/空格排序"
                 >
                   {c}
                   {sort?.col === i && (

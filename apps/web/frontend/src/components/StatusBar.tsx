@@ -80,6 +80,17 @@ export function StatusBar({ data, onPickOption }: {
   )
   const otherNotes = data.notes.filter((n) => !unverified.includes(n))
   const clarifying = data.status === 'need_clarification'
+  const hasNotes = Boolean(
+    unverified.length
+    || data.message
+    || (data.status !== 'ok' && !clarifying && STATUS_HINT[data.status])
+    || clarifying
+    || data.suggestions.length
+    || data.applied_filters.length
+    || data.candidates.length
+    || otherNotes.length
+    || Object.keys(data.trace).length,
+  )
 
   return (
     <div className={`statusbar tone-${tone}`}>
@@ -112,124 +123,130 @@ export function StatusBar({ data, onPickOption }: {
         )}
       </div>
 
-      {/* 口径未验证：用醒目样式，不混在普通提示里 */}
-      {unverified.length > 0 && (
-        <div className="alert alert-warn">
-          <strong>口径未经验证</strong>
-          {unverified.map((n, i) => (
-            <div key={i}>{n}</div>
-          ))}
-        </div>
-      )}
-
-      {data.message && !clarifying && (
-        <div className={`alert alert-${tone === 'ok' ? 'info' : tone}`}>
-          {data.message}
-        </div>
-      )}
-
-      {/* 归因：状态说明与"下一步怎么办"。后端 message 是本次的具体原因，
-          这里是该类失败的通解——两者一起才够用户行动。 */}
-      {data.status !== 'ok' && !clarifying && STATUS_HINT[data.status] && (
-        <div className="alert alert-info status-hint">
-          <strong>
-            {STATUS_LABEL[data.status] ?? data.status}：为什么、怎么办
-          </strong>
-          <div>{STATUS_HINT[data.status]}</div>
-        </div>
-      )}
-
-      {/* 智能体追问：把问题和可选项做成可点的按钮。
-          用户不必打字——点一下就是回答，下一轮自动带上会话。 */}
-      {clarifying && (
-        <div className="alert alert-warn clarify">
-          <strong>智能体需要你补充信息</strong>
-          <div className="clarify-q">{data.message}</div>
-          <div className="meta">{STATUS_HINT.need_clarification}</div>
-          {data.candidates.length > 0 && (
-            <div className="chips">
-              {data.candidates.map((c, i) => (
-                <button
-                  className="chip chip-action"
-                  key={i}
-                  onClick={() => onPickOption?.(c)}
-                  title="点击以此作为回答"
-                >
-                  {c}
-                </button>
+      {/* 记录脚注：口径/未验证/建议/追问/耗时从主条里分出来，
+          主条只留一行 KPI，脚注用细分隔线压小字号——像实验记录的备注。 */}
+      {hasNotes && (
+        <div className="status-notes">
+          {/* 口径未验证：用醒目样式，不混在普通提示里 */}
+          {unverified.length > 0 && (
+            <div className="alert alert-warn">
+              <strong>口径未经验证</strong>
+              {unverified.map((n, i) => (
+                <div key={i}>{n}</div>
               ))}
             </div>
           )}
-          <div className="meta">
-            也可以直接在下方输入框里回答，或点选项由我代填
-          </div>
+
+          {data.message && !clarifying && (
+            <div className={`alert alert-${tone === 'ok' ? 'info' : tone}`}>
+              {data.message}
+            </div>
+          )}
+
+          {/* 归因：状态说明与"下一步怎么办"。后端 message 是本次的具体原因，
+              这里是该类失败的通解——两者一起才够用户行动。 */}
+          {data.status !== 'ok' && !clarifying && STATUS_HINT[data.status] && (
+            <div className="alert alert-info status-hint">
+              <strong>
+                {STATUS_LABEL[data.status] ?? data.status}：为什么、怎么办
+              </strong>
+              <div>{STATUS_HINT[data.status]}</div>
+            </div>
+          )}
+
+          {/* 智能体追问：把问题和可选项做成可点的按钮。
+              用户不必打字——点一下就是回答，下一轮自动带上会话。 */}
+          {clarifying && (
+            <div className="alert alert-warn clarify">
+              <strong>智能体需要你补充信息</strong>
+              <div className="clarify-q">{data.message}</div>
+              <div className="meta">{STATUS_HINT.need_clarification}</div>
+              {data.candidates.length > 0 && (
+                <div className="chips">
+                  {data.candidates.map((c, i) => (
+                    <button
+                      className="chip chip-action"
+                      key={i}
+                      onClick={() => onPickOption?.(c)}
+                      title="点击以此作为回答"
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="meta">
+                也可以直接在下方输入框里回答，或点选项由我代填
+              </div>
+            </div>
+          )}
+
+          {data.suggestions.length > 0 && (
+            <div className="alert alert-info">
+              <strong>建议</strong>
+              <ul className="tight">
+                {data.suggestions.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {data.applied_filters.length > 0 && (
+            <div className="alert alert-info">
+              <strong>生效的过滤条件</strong>
+              <div className="chips">
+                {data.applied_filters.map((f, i) => (
+                  <span className="chip" key={i}>
+                    {f}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {data.candidates.length > 0 && !clarifying && (
+            <div className="alert alert-warn">
+              <strong>候选字段（点击可复制）</strong>
+              <div className="chips">
+                {data.candidates.map((c, i) => (
+                  <button
+                    className="chip chip-action"
+                    key={i}
+                    onClick={() => navigator.clipboard?.writeText(c)}
+                    title="复制该字段名"
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {otherNotes.length > 0 && (
+            <details className="notes">
+              <summary>其它提示（{otherNotes.length}）</summary>
+              <ul className="tight">
+                {otherNotes.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {Object.keys(data.trace).length > 0 && (
+            <details className="notes">
+              <summary>各阶段耗时</summary>
+              <div className="chips">
+                {Object.entries(data.trace).map(([k, v]) => (
+                  <span className="chip mono" key={k}>
+                    {k.replace(/_ms$/, '')} {v}ms
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
-      )}
-
-      {data.suggestions.length > 0 && (
-        <div className="alert alert-info">
-          <strong>建议</strong>
-          <ul className="tight">
-            {data.suggestions.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {data.applied_filters.length > 0 && (
-        <div className="alert alert-info">
-          <strong>生效的过滤条件</strong>
-          <div className="chips">
-            {data.applied_filters.map((f, i) => (
-              <span className="chip" key={i}>
-                {f}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {data.candidates.length > 0 && (
-        <div className="alert alert-warn">
-          <strong>候选字段（点击可复制）</strong>
-          <div className="chips">
-            {data.candidates.map((c, i) => (
-              <button
-                className="chip chip-action"
-                key={i}
-                onClick={() => navigator.clipboard?.writeText(c)}
-                title="复制该字段名"
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {otherNotes.length > 0 && (
-        <details className="notes">
-          <summary>其它提示（{otherNotes.length}）</summary>
-          <ul className="tight">
-            {otherNotes.map((n, i) => (
-              <li key={i}>{n}</li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      {Object.keys(data.trace).length > 0 && (
-        <details className="notes">
-          <summary>各阶段耗时</summary>
-          <div className="chips">
-            {Object.entries(data.trace).map(([k, v]) => (
-              <span className="chip mono" key={k}>
-                {k.replace(/_ms$/, '')} {v}ms
-              </span>
-            ))}
-          </div>
-        </details>
       )}
     </div>
   )
