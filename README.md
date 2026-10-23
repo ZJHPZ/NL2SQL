@@ -544,19 +544,24 @@ python tests/test_m7_tasks.py
 python tests/test_m7_agent_tasks.py
 python tests/test_m7_jdbc.py            # JDBC 桥需要 JDK 17；首次要联网下载 Maven 驱动
 python tests/test_m7_projects_api.py    # 项目/数据源/任务 HTTP 契约
-# 起界面后：顶部「项目」新建项目并连库 →「任务」新建/生成 SQL → 点「运行」
+# 起界面后：「项目」新建项目并连库 → 点项目进入 →「任务」里对 ods/dwd/dwm/ads
+#     文件夹右键 → 新建任务（SQL 可运行；PySpark 只保存代码与版本，执行器未接入）
 
 # 5k) 前端体验（P0，无需 Key）
 #     查询走 SSE：连上即返回进度（实测首反馈 ~70ms，之前要等 2.4–3.9s），
 #     时间线显示「连接→选工具→执行→整理」；可随时取消；结论按 Markdown 渲染；
 #     首轮有骨架屏；键盘可达（skip link / 焦点环 / aria-live）——axe 四态 0 违规。
-#     视觉为 v8「实验记录本 · 暖纸墨线」（按 impeccable skill 重设计）：暖纸底 +
-#     墨字 + 1px 发丝线，左侧 236px 记录索引 rail（01–03 导航/版本/会话），主列
-#     56px 顶栏 + 带 gutter 编号的记录页；三字体分工（IBM Plex Serif 标题 /
-#     IBM Plex Sans 正文 / JetBrains Mono 编号与数据），空态是 serif 44px 标题 +
-#     墨边查询框 + A1–A4 横线示例索引，结果区按「KPI 脚注 → 结论 → SQL 证据 →
-#     结果表」排；语义色只剩橄榄（active）与朱红（错误），无渐变/无玻璃/无重投影，
-#     圆角 2–8px。token 化 + 1280/900/520 三档无横向溢出，axe 四态 0 违规；
+#     视觉为 v9「实验记录本 · 暖纸墨线」（按 impeccable skill 重设计，v8 之上建立
+#     主次）：左侧 236px **墨色记录书脊**（rail，纸色当前项 + 朱红小方），右侧纸页
+#     主列：56px 顶栏 + 带 gutter 编号的记录页；页头 2px 墨线压底、页面标题 38px
+#     serif，结果区按「页眉注记（KPI）→ 记录正文（结论，2px 墨线开篇）→ SQL 证据 →
+#     结果表（墨条表头）」排，单一朱红作行动色（主按钮 hover / 错误），橄榄作状态色。
+#     导航分两级：首页只放「工作台 / 项目」，进入项目后侧栏才展开「概览 / 任务」。
+#     任务页 = 文件夹树（默认 ods/dwd/dwm/ads）+ 右键菜单（新建任务 / 子文件夹 /
+#     重命名 / 删除）+ 新建任务对话框（SQL 可运行；PySpark 可保存与版本管理、
+#     执行器未接入会如实提示）。三字体分工（IBM Plex Serif 标题 / IBM Plex Sans
+#     正文 / JetBrains Mono 编号与数据），圆角 2–8px，无渐变/无玻璃/无重投影；
+#     1280/900/520 三档无横向溢出，axe 六态 0 违规；
 #     设计系统与纪律见 DESIGN.md，方向契约见 .impeccable/surfaces/。
 #     验证：起界面后点「查询」观察进度逐步出现，中途点「取消」应立即恢复；
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx' 后问题才有真实模型结论（离线时用规则规划器）。

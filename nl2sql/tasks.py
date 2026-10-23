@@ -40,12 +40,16 @@ from .errors import TaskError
 
 __all__ = [
     "AI_COMMENT_PREFIX",
+    "DEFAULT_TASK_FOLDERS",
     "MAX_SQL_CHARS",
     "Task",
     "TaskRevision",
     "TaskStore",
     "default_task_store_path",
     "stamp_ai_comment",
+    "validate_folder_path",
+    "validate_task_content",
+    "validate_task_kind",
     "validate_task_sql",
 ]
 
@@ -54,6 +58,17 @@ AI_COMMENT_PREFIX = "ai修改"
 MAX_SQL_CHARS = 20000
 MAX_NAME_CHARS = 80
 MAX_NOTE_CHARS = 500
+
+# 任务类型。SQL 走只读查询链路；PySpark 只保存代码，执行器尚未接入，
+# 界面上必须如实标注「暂不可运行」，不能假装能跑。
+TASK_KIND_SQL = "sql"
+TASK_KIND_PYSPARK = "pyspark"
+TASK_KINDS = (TASK_KIND_SQL, TASK_KIND_PYSPARK)
+
+# 项目首次打开任务库时自动建的四层数仓目录（ODS → DWD → DWM → ADS）。
+DEFAULT_TASK_FOLDERS = ("ods", "dwd", "dwm", "ads")
+MAX_FOLDER_CHARS = 200
+MAX_FOLDER_SEGMENT = 32
 
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 _AI_TS_FORMAT = "%Y-%m-%d %H:%M"
@@ -66,6 +81,8 @@ CREATE TABLE IF NOT EXISTS task (
     task_id      TEXT PRIMARY KEY,
     project_id   TEXT NOT NULL DEFAULT '',
     source_id    TEXT NOT NULL DEFAULT '',
+    folder       TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'sql',
     name         TEXT NOT NULL,
     description  TEXT NOT NULL DEFAULT '',
     sql          TEXT NOT NULL,
@@ -93,7 +110,15 @@ CREATE TABLE IF NOT EXISTS task_revision (
     PRIMARY KEY (task_id, revision)
 );
 
+-- 任务文件夹（树）。path 用 '/' 分段，例如 "ods"、"ods/原始层"。
+CREATE TABLE IF NOT EXISTS task_folder (
+    path         TEXT PRIMARY KEY,
+    created_by   TEXT NOT NULL DEFAULT 'user',
+    created_at   TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_task_updated ON task(updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_folder ON task_folder(path);
 """
 
 
@@ -125,6 +150,73 @@ def validate_task_sql(sql: str) -> str:
             "不能包含 INSERT / UPDATE / DELETE / DDL 等写操作"
         )
     return text
+
+
+def validate_task_kind(kind: str | None) -> str:
+    """校验任务类型。默认 SQL；PySpark 仅保存代码与版本，执行器未接入。"""
+    text = (kind or TASK_KIND_SQL).strip().lower()
+    if text not in TASK_KINDS:
+        raise TaskError(
+            f"未知任务类型：{kind!r}（只支持 {' / '.join(TASK_KINDS)}）"
+        )
+    return text
+
+
+def validate_task_content(kind: str, content: str) -> str:
+    """按任务类型校验代码正文。
+
+    SQL 任务必须单条只读查询（会被真正执行）；
+    PySpark 任务只是保存代码与版本，执行器未接入，因此不做只读语法限制。
+    """
+    if kind == TASK_KIND_PYSPARK:
+        text = (content or "").strip()
+        if not text:
+            raise TaskError("PySpark 代码不能为空")
+        if len(text) > MAX_SQL_CHARS:
+            raise TaskError(
+                f"PySpark 代码太长（{len(text)} 字符，上限 {MAX_SQL_CHARS}）"
+            )
+        return text
+    return validate_task_sql(content)
+
+
+MAX_FOLDER_DEPTH = 4
+_FOLDER_BAD_CHARS = set('<>:"|?*\\\\')
+
+
+def validate_folder_path(path: str | None, *, allow_empty: bool = True) -> str:
+    """校验并规范化文件夹路径（'/' 分段）。
+
+    约定：空字符串表示「根目录 / 未分类」；其余按 `ods/原始层` 这样的路径存储。
+    深度、段长都有上限——右键菜单建目录是给人用的，不该出现深层嵌套。
+    """
+    raw = (path or "").replace("\\", "/").strip()
+    if not raw:
+        if allow_empty:
+            return ""
+        raise TaskError("文件夹名称不能为空")
+    segments = [seg.strip() for seg in raw.split("/") if seg.strip()]
+    if not segments:
+        if allow_empty:
+            return ""
+        raise TaskError("文件夹名称不能为空")
+    if len(segments) > MAX_FOLDER_DEPTH:
+        raise TaskError(f"文件夹层级太深（上限 {MAX_FOLDER_DEPTH} 层）")
+    for seg in segments:
+        if seg in (".", ".."):
+            raise TaskError("文件夹名称不能是 . 或 ..")
+        if len(seg) > MAX_FOLDER_SEGMENT:
+            raise TaskError(
+                f"文件夹名称太长（{len(seg)} 字，上限 {MAX_FOLDER_SEGMENT}）"
+            )
+        if any(ch in _FOLDER_BAD_CHARS for ch in seg):
+            raise TaskError("文件夹名称不能包含 < > : \" | ? * 等字符")
+        if any(ord(ch) < 32 for ch in seg):
+            raise TaskError("文件夹名称不能包含控制字符")
+    normalized = "/".join(segments)
+    if len(normalized) > MAX_FOLDER_CHARS:
+        raise TaskError(f"文件夹路径太长（上限 {MAX_FOLDER_CHARS} 字符）")
+    return normalized
 
 
 def _validate_name(name: str) -> str:
@@ -175,6 +267,8 @@ class Task:
     revision: int
     enabled: bool = True
     tags: tuple[str, ...] = ()
+    folder: str = ""
+    kind: str = TASK_KIND_SQL
     created_by: str = _AUTHOR_USER
     updated_by: str = _AUTHOR_USER
     created_at: str = ""
@@ -188,6 +282,8 @@ class Task:
             "task_id": self.task_id,
             "project_id": self.project_id,
             "source_id": self.source_id,
+            "folder": self.folder,
+            "kind": self.kind,
             "name": self.name,
             "description": self.description,
             "sql": self.sql,
@@ -283,7 +379,9 @@ class TaskStore:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
-            # 兼容早期任务库（无 source_id 列）：加列而不是重建表。
+            # 兼容早期任务库：加列而不是重建表。
+            #   task 早期无 source_id，本轮新增 folder / kind；
+            #   task_revision 早期无 source_id。
             for table in ("task", "task_revision"):
                 columns = {
                     row["name"]
@@ -294,6 +392,26 @@ class TaskStore:
                         f"ALTER TABLE {table} ADD COLUMN "
                         "source_id TEXT NOT NULL DEFAULT ''"
                     )
+            task_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(task)")
+            }
+            if "folder" not in task_columns:
+                conn.execute(
+                    "ALTER TABLE task ADD COLUMN folder TEXT NOT NULL DEFAULT ''"
+                )
+            if "kind" not in task_columns:
+                conn.execute(
+                    "ALTER TABLE task ADD COLUMN kind TEXT NOT NULL DEFAULT 'sql'"
+                )
+            # 首次打开任务库时自动建四个数仓目录（ODS → DWD → DWM → ADS）。
+            # 用 INSERT OR IGNORE 保证幂等：已有项目不会被重复插入或覆盖。
+            now = self._now()
+            for path in DEFAULT_TASK_FOLDERS:
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_folder (path, created_by, created_at) "
+                    "VALUES (?, 'system', ?)",
+                    (path, now),
+                )
 
     # ------------------------------------------------------------ 查询
     def list(self, *, limit: int | None = None) -> list[Task]:
@@ -344,11 +462,17 @@ class TaskStore:
         description: str = "",
         tags: tuple[str, ...] | list[str] = (),
         source_id: str = "",
+        folder: str = "",
+        kind: str = TASK_KIND_SQL,
         author: str = _AUTHOR_USER,
         note: str = "",
     ) -> Task:
         clean_name = _validate_name(name)
-        clean_sql = validate_task_sql(sql)
+        clean_kind = validate_task_kind(kind)
+        clean_sql = validate_task_content(clean_kind, sql)
+        clean_folder = validate_folder_path(folder)
+        if clean_folder and not self._folder_exists(clean_folder):
+            raise TaskError(f"文件夹不存在：{clean_folder}（刷新后再试）")
         now = self._now()
         task_id = uuid.uuid4().hex[:12]
         clean_tags = _clean_tags(tags)
@@ -356,12 +480,12 @@ class TaskStore:
         clean_source = (source_id or "").strip()[:64]
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO task (task_id, project_id, source_id, name, "
-                "description, sql, tags, enabled, revision, created_by, "
+                "INSERT INTO task (task_id, project_id, source_id, folder, kind, "
+                "name, description, sql, tags, enabled, revision, created_by, "
                 "updated_by, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)",
-                (task_id, self._project_id, clean_source, clean_name,
-                 clean_desc, clean_sql,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)",
+                (task_id, self._project_id, clean_source, clean_folder, clean_kind,
+                 clean_name, clean_desc, clean_sql,
                  json.dumps(clean_tags, ensure_ascii=False), author, author,
                  now, now),
             )
@@ -386,6 +510,8 @@ class TaskStore:
         tags: tuple[str, ...] | list[str] | None = None,
         enabled: bool | None = None,
         source_id: str | None = None,
+        folder: str | None = None,
+        kind: str | None = None,
         author: str = _AUTHOR_USER,
         note: str = "",
     ) -> Task:
@@ -398,7 +524,14 @@ class TaskStore:
         if current is None:
             raise TaskError(f"任务不存在: {task_id}")
         clean_name = _validate_name(name) if name is not None else current.name
-        clean_sql = validate_task_sql(sql) if sql is not None else current.sql
+        clean_kind = validate_task_kind(kind) if kind is not None else current.kind
+        if sql is not None:
+            clean_sql = validate_task_content(clean_kind, sql)
+        elif kind is not None:
+            # 只改类型也要保证当前正文对目标类型合法，不允许留下“跑不了”的任务。
+            clean_sql = validate_task_content(clean_kind, current.sql)
+        else:
+            clean_sql = current.sql
         clean_desc = (
             (description or "").strip()[:1000]
             if description is not None else current.description
@@ -411,16 +544,20 @@ class TaskStore:
             (source_id or "").strip()[:64]
             if source_id is not None else current.source_id
         )
+        clean_folder = (
+            validate_folder_path(folder) if folder is not None else current.folder
+        )
         now = self._now()
         revision = current.revision + 1
         with self._connect() as conn:
             conn.execute(
                 "UPDATE task SET name = ?, description = ?, sql = ?, tags = ?, "
-                "enabled = ?, source_id = ?, revision = ?, updated_by = ?, "
-                "updated_at = ? WHERE task_id = ?",
+                "enabled = ?, source_id = ?, folder = ?, kind = ?, revision = ?, "
+                "updated_by = ?, updated_at = ? WHERE task_id = ?",
                 (clean_name, clean_desc, clean_sql,
                  json.dumps(clean_tags, ensure_ascii=False), 1 if clean_enabled else 0,
-                 clean_source, revision, author, now, task_id),
+                 clean_source, clean_folder, clean_kind, revision, author, now,
+                 task_id),
             )
             conn.execute(
                 "INSERT INTO task_revision (task_id, revision, source_id, name, "
@@ -450,6 +587,143 @@ class TaskStore:
                 (self._now(), (status or "")[:40], task_id),
             )
 
+    # ------------------------------------------------------------ 文件夹
+    def _folder_exists(self, path: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM task_folder WHERE path = ?", (path,)
+            ).fetchone()
+        return row is not None
+
+    def folders(self) -> list[dict[str, Any]]:
+        """列出文件夹（每个还带直接子任务数量，便于前端画树上的计数）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT f.path, f.created_by, f.created_at, "
+                "(SELECT COUNT(*) FROM task t WHERE t.folder = f.path) AS task_count "
+                "FROM task_folder f ORDER BY f.path"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_folder(self, path: str, *, author: str = _AUTHOR_USER) -> dict[str, Any]:
+        clean = validate_folder_path(path, allow_empty=False)
+        if "/" in clean:
+            parent = clean.rsplit("/", 1)[0]
+            if not self._folder_exists(parent):
+                raise TaskError(f"父文件夹不存在：{parent}（先建上一级）")
+        if self._folder_exists(clean):
+            raise TaskError(f"文件夹已存在：{clean}")
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO task_folder (path, created_by, created_at) "
+                "VALUES (?, ?, ?)",
+                (clean, author, now),
+            )
+        return {"path": clean, "created_by": author, "created_at": now,
+                "task_count": 0}
+
+    def rename_folder(
+        self, path: str, new_path: str, *, author: str = _AUTHOR_USER
+    ) -> dict[str, Any]:
+        """重命名文件夹；子文件夹与其中的任务路径一起搬家（保留层级）。"""
+        clean_old = validate_folder_path(path, allow_empty=False)
+        clean_new = validate_folder_path(new_path, allow_empty=False)
+        if clean_old == clean_new:
+            raise TaskError("新名称与原名相同")
+        if not self._folder_exists(clean_old):
+            raise TaskError(f"文件夹不存在：{clean_old}")
+        if clean_new.startswith(clean_old + "/"):
+            raise TaskError("不能把文件夹移动到它自己内部")
+        if "/" in clean_new:
+            parent = clean_new.rsplit("/", 1)[0]
+            if not self._folder_exists(parent):
+                raise TaskError(f"父文件夹不存在：{parent}（先建上一级）")
+        with self._connect() as conn:
+            all_paths = [
+                row["path"] for row in conn.execute("SELECT path FROM task_folder")
+            ]
+            affected = [
+                p for p in all_paths if p == clean_old or p.startswith(clean_old + "/")
+            ]
+            moving = {
+                p: clean_new + p[len(clean_old):] for p in affected
+            }
+            target_set = {p for p in all_paths if p not in moving}
+            clash = [p for p in moving.values() if p in target_set]
+            if clash:
+                raise TaskError(f"目标位置已有同名文件夹：{clash[0]}")
+            now = self._now()
+            # 先删掉旧行，再按新路径插回，避免主键顺序冲突。
+            for old, new in sorted(moving.items(), key=lambda kv: len(kv[0]), reverse=True):
+                conn.execute("DELETE FROM task_folder WHERE path = ?", (old,))
+            for old, new in sorted(moving.items(), key=lambda kv: len(kv[0])):
+                conn.execute(
+                    "INSERT INTO task_folder (path, created_by, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (new, author, now),
+                )
+            # 任务行跟着改路径。用 Python 精确比对前缀（不用 SQL LIKE，避免 _ / % 通配）。
+            task_folders = [
+                row["folder"]
+                for row in conn.execute(
+                    "SELECT DISTINCT folder FROM task WHERE folder <> ''"
+                )
+            ]
+            for tf in task_folders:
+                for old, new in moving.items():
+                    if tf == old or tf.startswith(old + "/"):
+                        conn.execute(
+                            "UPDATE task SET folder = ? WHERE folder = ?",
+                            (new + tf[len(old):], tf),
+                        )
+                        break
+        return {"path": clean_new, "renamed_from": clean_old}
+
+    def delete_folder(self, path: str) -> int:
+        """删除空文件夹（含子目录也要求先清空）。返回删掉的目录数。"""
+        clean = validate_folder_path(path, allow_empty=False)
+        if not self._folder_exists(clean):
+            raise TaskError(f"文件夹不存在：{clean}")
+        with self._connect() as conn:
+            rows = [
+                row["path"] for row in conn.execute("SELECT path FROM task_folder")
+            ]
+            affected = [
+                p for p in rows if p == clean or p.startswith(clean + "/")
+            ]
+            placeholders = ",".join("?" for _ in affected)
+            used = conn.execute(
+                f"SELECT COUNT(*) AS n FROM task WHERE folder IN ({placeholders}) "
+                "AND folder <> ''",
+                tuple(affected),
+            ).fetchone()
+            if used and int(used["n"]) > 0:
+                raise TaskError(
+                    f"文件夹「{clean}」里还有 {int(used['n'])} 个任务，"
+                    "先把任务移走或删除，再删文件夹"
+                )
+            for p in sorted(affected, key=len, reverse=True):
+                conn.execute("DELETE FROM task_folder WHERE path = ?", (p,))
+        return len(affected)
+
+    def move(self, task_id: str, folder: str) -> Task:
+        """把任务移动到另一个文件夹（元数据操作，不生成新版本）。"""
+        current = self.get(task_id)
+        if current is None:
+            raise TaskError(f"任务不存在: {task_id}")
+        clean_folder = validate_folder_path(folder)
+        if clean_folder and not self._folder_exists(clean_folder):
+            raise TaskError(f"文件夹不存在：{clean_folder}")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE task SET folder = ?, updated_at = ? WHERE task_id = ?",
+                (clean_folder, self._now(), task_id),
+            )
+        moved = self.get(task_id)
+        assert moved is not None
+        return moved
+
 
 # ===================================================================== 行转换
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -463,6 +737,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         revision=int(row["revision"]),
         enabled=bool(row["enabled"]),
         tags=tuple(_clean_tags(_load_tags(row["tags"]))),
+        folder=row["folder"] if "folder" in row.keys() else "",
+        kind=row["kind"] if "kind" in row.keys() else TASK_KIND_SQL,
         created_by=row["created_by"],
         updated_by=row["updated_by"],
         created_at=row["created_at"],

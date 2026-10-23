@@ -341,6 +341,10 @@ export interface TaskSummary {
   task_id: string
   name: string
   description: string
+  /** 所属文件夹路径（如 ods/原始层），空串 = 根目录 */
+  folder: string
+  /** "sql" | "pyspark"；PySpark 任务只能保存/版本，暂不支持运行 */
+  kind: string
   status: string
   /** 前若干字符，列表里做一行预览 */
   sql_preview: string
@@ -356,12 +360,43 @@ export interface TaskDetail {
   name: string
   description: string
   sql: string
+  folder: string
+  kind: string
   status: string
   created_by: string
   updated_by: string
   created_at: string
   updated_at: string
   revision: number
+}
+
+/** 任务文件夹（项目内是一棵树，路径用 '/' 分段） */
+export interface TaskFolder {
+  path: string
+  created_by: string
+  created_at: string
+  task_count: number
+}
+
+export interface TaskFoldersResponse {
+  project_id?: string
+  folders: TaskFolder[]
+  /** 首次进入自动创建的四层目录：ods / dwd / dwm / ads */
+  defaults?: string[]
+}
+
+export interface TaskFolderMutationResult {
+  ok: boolean
+  folders: TaskFolder[]
+  folder?: { path: string; renamed_from?: string }
+  /** 删除时被一并移除的空子目录数量 */
+  removed?: number
+}
+
+/** POST /api/projects/{pid}/tasks/{tid}/move 的返回：只改归属，不生成新版本 */
+export interface TaskMoveResult {
+  ok: boolean
+  task: TaskDetail
 }
 
 /** 版本记录。AI 修改（author="ai"）要在界面上有角标 */

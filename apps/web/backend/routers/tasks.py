@@ -17,10 +17,17 @@ from fastapi import APIRouter, HTTPException, Request
 
 from nl2sql.contracts.pipeline import QueryOutcome
 from nl2sql.errors import NL2SQLError, QueryTimeoutError
-from nl2sql.tasks import TaskStore
+from nl2sql.tasks import DEFAULT_TASK_FOLDERS, TASK_KIND_SQL, TaskStore
 
 from ..projects import DEFAULT_PROJECT_ID, ProjectHub
-from ..schemas import TaskCreateRequest, TaskRunRequest, TaskUpdateRequest
+from ..schemas import (
+    TaskCreateRequest,
+    TaskFolderCreateRequest,
+    TaskFolderRenameRequest,
+    TaskMoveRequest,
+    TaskRunRequest,
+    TaskUpdateRequest,
+)
 from ..serializers import outcome_to_response
 
 router = APIRouter(prefix="/api", tags=["tasks"])
@@ -101,6 +108,7 @@ def create_task(project_id: str, req: TaskCreateRequest,
         task = store.create(
             name=req.name, sql=req.sql, description=req.description,
             tags=req.tags, source_id=req.source_id or "", author="user",
+            folder=req.folder, kind=req.kind,
         )
     except NL2SQLError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -129,6 +137,7 @@ def update_task(project_id: str, task_id: str, req: TaskUpdateRequest,
             description=req.description, tags=req.tags,
             enabled=req.enabled, note=req.note or "用户编辑",
             author="user", source_id=req.source_id,
+            folder=req.folder, kind=req.kind,
         )
     except NL2SQLError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -143,6 +152,67 @@ def delete_task(project_id: str, task_id: str,
     _task_or_404(store, task_id)
     store.delete(task_id)
     return {"ok": True}
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/move")
+def move_task(project_id: str, task_id: str, req: TaskMoveRequest,
+              request: Request) -> dict[str, Any]:
+    """把任务移动到另一个文件夹（不生成版本，只改归属）。"""
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    _task_or_404(store, task_id)
+    try:
+        task = store.move(task_id, req.folder)
+    except NL2SQLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"task": _summary(task)}
+
+
+# ================================================================== 文件夹
+@router.get("/projects/{project_id}/task-folders")
+def list_task_folders(project_id: str, request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    return {
+        "project_id": project_id,
+        "folders": store.folders(),
+        "defaults": list(DEFAULT_TASK_FOLDERS),
+    }
+
+
+@router.post("/projects/{project_id}/task-folders")
+def create_task_folder(project_id: str, req: TaskFolderCreateRequest,
+                       request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    try:
+        folder = store.create_folder(req.path, author="user")
+    except NL2SQLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"folder": folder}
+
+
+@router.put("/projects/{project_id}/task-folders")
+def rename_task_folder(project_id: str, req: TaskFolderRenameRequest,
+                       request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    try:
+        result = store.rename_folder(req.path, req.new_path, author="user")
+    except NL2SQLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "folder": result, "folders": store.folders()}
+
+
+@router.delete("/projects/{project_id}/task-folders")
+def delete_task_folder(project_id: str, path: str, request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    try:
+        removed = store.delete_folder(path)
+    except NL2SQLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "removed": removed, "folders": store.folders()}
 
 
 # ================================================================== 版本
@@ -192,6 +262,13 @@ def run_task(project_id: str, task_id: str, req: TaskRunRequest,
     hub = _hub(request)
     store, engine = _store_for(hub, project_id)
     task = _task_or_404(store, task_id)
+    if task.kind != TASK_KIND_SQL:
+        # 如实拒绝：PySpark 只有存储与版本，没有执行器。不能假装能跑。
+        raise HTTPException(
+            status_code=400,
+            detail="PySpark 任务执行器尚未接入：当前只能保存代码与版本，"
+                   "可运行的只有 SQL 任务",
+        )
 
     agent = getattr(engine, "_agent", None)
     guard = getattr(agent, "_guard", None) or getattr(engine, "_guard", None)

@@ -47,21 +47,39 @@ import { TasksPanel } from './components/TasksPanel'
 
 type SideTab = 'history' | 'knowledge' | 'admin'
 
-/** 顶层三个视图。不引入 router：只有一个页面，切 tab 而已。
- *  项目/任务面板只在切到对应视图时挂载 → 数据按需加载，问答页不多打接口。
+/** 顶层视图只有两个：工作台 / 项目。
+ *  进入某个项目后才展开项目内的功能（概览、任务）——导航层级与真实心智一致：
+ *  「先选项目，再干活」，而不是把所有功能一次性堆在侧栏。
  */
-type View = 'ask' | 'projects' | 'tasks'
+type View = 'ask' | 'projects' | 'project' | 'tasks'
 
-const VIEWS: { id: View; label: string }[] = [
-  { id: 'ask', label: '问答' },
+const TOP_VIEWS: { id: 'ask' | 'projects'; label: string }[] = [
+  { id: 'ask', label: '工作台' },
   { id: 'projects', label: '项目' },
+]
+
+/** 进入项目后、侧栏里展开的二级功能。 */
+const PROJECT_VIEWS: { id: 'project' | 'tasks'; label: string }[] = [
+  { id: 'project', label: '概览' },
   { id: 'tasks', label: '任务' },
 ]
 
-const VIEW_ICONS: Record<View, typeof MessageSquareText> = {
+const TOP_VIEW_ICONS: Record<'ask' | 'projects', typeof MessageSquareText> = {
   ask: MessageSquareText,
   projects: FolderKanban,
+}
+
+const PROJECT_VIEW_ICONS: Record<'project' | 'tasks', typeof MessageSquareText> = {
+  project: FolderKanban,
   tasks: ListChecks,
+}
+
+/** 顶栏面包屑：当前处在记录本的哪一页。 */
+const VIEW_META: Record<View, { kicker: string; label: string }> = {
+  ask: { kicker: '记录 01', label: '工作台' },
+  projects: { kicker: '索引 02', label: '全部项目' },
+  project: { kicker: '项目 03', label: '概览' },
+  tasks: { kicker: '项目 04', label: '任务' },
 }
 
 /** 执行器的中文名。
@@ -277,6 +295,8 @@ export default function App() {
 
   // ---------------------------------------------------------------- 视图与项目（M7）
   const [view, setView] = useState<View>('ask')
+  // 进入项目 = 进入项目的「文件夹」；没进入之前，侧栏不展示项目内功能。
+  const [enteredProjectId, setEnteredProjectId] = useState<string | null>(null)
   // ref 与 state 同步保存当前项目：loadProjects 的依赖为空，
   // 避免切换项目 -> 重载项目列表 -> 列表回调再触发切项目的循环。
   const projectIdRef = useRef<string>(getProjectId())
@@ -354,16 +374,39 @@ export default function App() {
       projectIdRef.current = id
       setProjectId(id)
       setProjectIdState(id)
+      // 已经进入某个项目时，顶栏切换项目 = 跟着进入新项目的同一层功能。
+      setEnteredProjectId((prev) => (prev ? id : prev))
       setData(null)
       setSessionId(null)
       setReqError(null)
       setShowTables(false)
       setPanelsOpen(false)
-      // 历史 / 表结构 / 知识库都是项目维度（请求带 X-Project-Id），换项目后重拉
-      void reloadSide()
+      // 先换项目元信息（default_source 跟着项目走），再拉侧栏数据。
+      // 直接 reloadSide() 会用上一个项目的 source_id，切到别的项目后必然 400。
+      void (async () => {
+        const r = await api.info()
+        if (r.ok) setInfo(r.data)
+      })()
     },
-    [reloadSide],
+    [],
   )
+
+  /** 进入项目：把项目设为当前项目，并打开项目内功能（默认概览）。 */
+  const enterProject = useCallback(
+    (id: string, target: 'project' | 'tasks' = 'project') => {
+      if (!id) return
+      setEnteredProjectId(id)
+      if (id !== projectIdRef.current) switchProject(id)
+      setView(target)
+    },
+    [switchProject],
+  )
+
+  /** 退出项目：回到「全部项目」列表，项目内功能从侧栏收起。 */
+  const leaveProject = useCallback(() => {
+    setEnteredProjectId(null)
+    setView('projects')
+  }, [])
 
   // ---------------------------------------------------------------- 动作
   /** 提问：走 SSE 流式接口。
@@ -615,6 +658,10 @@ export default function App() {
   ) : null
 
   // ---------------------------------------------------------------- 渲染
+  const enteredProject = enteredProjectId
+    ? projects.find((p) => p.id === enteredProjectId) ?? null
+    : null
+  const insideProject = view === 'project' || view === 'tasks'
   if (bootError) {
     return (
       <div className="boot-error">
@@ -642,14 +689,17 @@ export default function App() {
         </div>
 
         <nav className="rail-nav" aria-label="主导航">
-          {VIEWS.map((v, i) => {
-            const Icon = VIEW_ICONS[v.id]
+          {TOP_VIEWS.map((v, i) => {
+            const Icon = TOP_VIEW_ICONS[v.id]
+            const active =
+              view === v.id ||
+              (v.id === 'projects' && insideProject)
             return (
               <button
                 key={v.id}
-                className={view === v.id ? 'navbtn active' : 'navbtn'}
+                className={active ? 'navbtn active' : 'navbtn'}
                 onClick={() => setView(v.id)}
-                aria-current={view === v.id ? 'page' : undefined}
+                aria-current={active ? 'page' : undefined}
               >
                 <span className="nav-index mono" aria-hidden="true">
                   {String(i + 1).padStart(2, '0')}
@@ -660,6 +710,39 @@ export default function App() {
             )
           })}
         </nav>
+
+        {enteredProjectId && insideProject && (
+          <div className="rail-project">
+            <div className="rail-project-head">
+              <span className="rail-project-kicker mono">当前项目</span>
+              <span className="rail-project-name" title={enteredProject?.name ?? enteredProjectId}>
+                {enteredProject?.name ?? enteredProjectId}
+              </span>
+            </div>
+            <nav className="rail-subnav" aria-label="项目功能">
+              {PROJECT_VIEWS.map((v, i) => {
+                const Icon = PROJECT_VIEW_ICONS[v.id]
+                return (
+                  <button
+                    key={v.id}
+                    className={view === v.id ? 'navbtn navbtn-sub active' : 'navbtn navbtn-sub'}
+                    onClick={() => setView(v.id)}
+                    aria-current={view === v.id ? 'page' : undefined}
+                  >
+                    <span className="nav-index mono" aria-hidden="true">
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    <Icon size={14} aria-hidden="true" />
+                    <span className="nav-label">{v.label}</span>
+                  </button>
+                )
+              })}
+            </nav>
+            <button className="rail-back linkbtn" onClick={leaveProject}>
+              ← 全部项目
+            </button>
+          </div>
+        )}
 
         <div className="rail-foot">
           {info && <span className="badge badge-soft mono">v{info.version}</span>}
@@ -681,9 +764,12 @@ export default function App() {
           <div className="topbar-inner">
             <div className="topbar-context">
               <span className="topbar-kicker mono" aria-hidden="true">
-                {view === 'ask' ? '记录 01' : view === 'projects' ? '记录 02' : '记录 03'}
+                {VIEW_META[view].kicker}
               </span>
-              <span className="topbar-label">{VIEWS.find((v) => v.id === view)?.label}</span>
+              <span className="topbar-label">{VIEW_META[view].label}</span>
+              {insideProject && enteredProject && (
+                <span className="topbar-project mono">{enteredProject.name}</span>
+              )}
             </div>
 
             <span className="spacer" />
@@ -728,20 +814,36 @@ export default function App() {
           </div>
 
           <nav className="topnav" aria-label="主导航（紧凑）">
-            {VIEWS.map((v) => {
-              const Icon = VIEW_ICONS[v.id]
+            {TOP_VIEWS.map((v) => {
+              const Icon = TOP_VIEW_ICONS[v.id]
+              const active = view === v.id || (v.id === 'projects' && insideProject)
               return (
                 <button
                   key={v.id}
-                  className={view === v.id ? 'navbtn active' : 'navbtn'}
+                  className={active ? 'navbtn active' : 'navbtn'}
                   onClick={() => setView(v.id)}
-                  aria-current={view === v.id ? 'page' : undefined}
+                  aria-current={active ? 'page' : undefined}
                 >
                   <Icon size={14} aria-hidden="true" />
                   {v.label}
                 </button>
               )
             })}
+            {insideProject &&
+              PROJECT_VIEWS.map((v) => {
+                const Icon = PROJECT_VIEW_ICONS[v.id]
+                return (
+                  <button
+                    key={v.id}
+                    className={view === v.id ? 'navbtn active' : 'navbtn'}
+                    onClick={() => setView(v.id)}
+                    aria-current={view === v.id ? 'page' : undefined}
+                  >
+                    <Icon size={14} aria-hidden="true" />
+                    {v.label}
+                  </button>
+                )
+              })}
           </nav>
         </header>
 
@@ -805,10 +907,13 @@ export default function App() {
                     {showTables ? '收起表结构' : '查看表结构'}
                   </button>
                   <button className="linkbtn" onClick={() => setView('projects')}>
-                    项目管理
+                    进入项目
                   </button>
-                  <button className="linkbtn" onClick={() => setView('tasks')}>
-                    SQL 任务
+                  <button
+                    className="linkbtn"
+                    onClick={() => enterProject(projectId, 'tasks')}
+                  >
+                    当前项目任务
                   </button>
                 </div>
 
@@ -972,24 +1077,25 @@ export default function App() {
             </span>
             <div className="page-head">
               <div>
-                <h1 className="page-title">项目管理与数据源</h1>
+                <h1 className="page-title">全部项目</h1>
                 <p className="page-sub">
-                  每个项目有自己的数据源、表快照、语义口径与 SQL 任务
+                  先进入一个项目，再打开它的数据源、语义口径与任务
                 </p>
               </div>
               {info && <div className="env-chips"><EnvChips info={info} /></div>}
             </div>
             <ProjectsPanel
-              key={projectId}
+              key={`list-${projectId}`}
               projectId={projectId}
               onSelectProject={switchProject}
+              onEnterProject={enterProject}
               onProjectsChanged={() => void loadProjects()}
             />
           </div>
         </main>
       )}
 
-      {view === 'tasks' && (
+      {view === 'project' && enteredProjectId && (
         <main id="main-content" className="main">
           <div className="page">
             <span className="gutter-tag mono" aria-hidden="true">
@@ -997,17 +1103,49 @@ export default function App() {
             </span>
             <div className="page-head">
               <div>
-                <h1 className="page-title">SQL 任务</h1>
+                <h1 className="page-title">
+                  {enteredProject?.name ?? enteredProjectId}
+                </h1>
                 <p className="page-sub">
-                  保存下来的只读 SQL；点「运行」才执行，每次修改都会留下版本记录
+                  项目数据源、表快照与语义口径 · 左侧可切到任务
+                </p>
+              </div>
+              {info && <div className="env-chips"><EnvChips info={info} /></div>}
+            </div>
+            <ProjectsPanel
+              key={`detail-${enteredProjectId}`}
+              projectId={enteredProjectId}
+              detailOnly
+              onSelectProject={switchProject}
+              onEnterProject={enterProject}
+              onProjectsChanged={() => void loadProjects()}
+            />
+          </div>
+        </main>
+      )}
+
+      {view === 'tasks' && enteredProjectId && (
+        <main id="main-content" className="main">
+          <div className="page">
+            <span className="gutter-tag mono" aria-hidden="true">
+              04
+            </span>
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">
+                  {enteredProject?.name ? `${enteredProject.name} · 任务` : '任务'}
+                </h1>
+                <p className="page-sub">
+                  右键文件夹新建任务或子文件夹；任务类型区分 SQL 与 PySpark
                 </p>
               </div>
               {info && <div className="env-chips"><EnvChips info={info} /></div>}
             </div>
             <TasksPanel
-              key={projectId}
-              projectId={projectId}
-              isDefaultProject={projectId === defaultProjectId}
+              key={`tasks-${enteredProjectId}`}
+              projectId={enteredProjectId}
+              projectName={enteredProject?.name ?? ''}
+              isDefaultProject={enteredProjectId === defaultProjectId}
             />
           </div>
         </main>

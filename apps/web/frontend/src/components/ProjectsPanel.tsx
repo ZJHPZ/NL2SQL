@@ -113,10 +113,16 @@ const errText = (r: { error: { error: string; detail: string } }) =>
 export function ProjectsPanel({
   projectId,
   onSelectProject,
+  onEnterProject,
+  detailOnly = false,
   onProjectsChanged,
 }: {
   projectId: string
   onSelectProject: (id: string) => void
+  /** 点项目 = 进入项目；缺省时退化为只切换项目（旧行为） */
+  onEnterProject?: (id: string, target?: 'project' | 'tasks') => void
+  /** 只看当前项目的详情（已进入项目的工作区），不渲染左侧项目清单 */
+  detailOnly?: boolean
   /** 项目清单发生变化（新建/删除/改名）时通知顶栏刷新切换器 */
   onProjectsChanged: () => void
 }) {
@@ -267,6 +273,7 @@ export function ProjectsPanel({
     await loadList()
     onProjectsChanged()
     onSelectProject(r.data.id)
+    onEnterProject?.(r.data.id)
   }
 
   const saveProject = async () => {
@@ -308,6 +315,7 @@ export function ProjectsPanel({
     if (pid === projectId) {
       const fallback = projects?.find((p) => p.is_default)?.id ?? 'default'
       onSelectProject(fallback)
+      if (detailOnly) onEnterProject?.(fallback)
     }
   }
 
@@ -548,8 +556,9 @@ export function ProjectsPanel({
 
   // ------------------------------------------------------------ 渲染
   return (
-    <div className="workspace">
+    <div className={detailOnly ? 'workspace workspace-detail' : 'workspace'}>
       {/* -------------------------------------------------------- 项目列表 */}
+      {!detailOnly && (
       <aside className="ws-side">
         <div className="ws-head">
           <b>项目</b>
@@ -610,7 +619,10 @@ export function ProjectsPanel({
               <button
                 className={p.id === projectId ? 'ws-item active' : 'ws-item'}
                 title={p.description || p.name}
-                onClick={() => onSelectProject(p.id)}
+                onClick={() => {
+                  onSelectProject(p.id)
+                  onEnterProject?.(p.id)
+                }}
               >
                 <div className="ws-item-title">{p.name}</div>
                 <div className="ws-item-meta">
@@ -620,12 +632,14 @@ export function ProjectsPanel({
                   <span className="meta">
                     数据源 {p.sources?.length ?? 0} · 任务 {p.task_count ?? 0}
                   </span>
+                  {onEnterProject && <span className="ws-enter mono">进入 →</span>}
                 </div>
               </button>
             </li>
           ))}
         </ul>
       </aside>
+      )}
 
       {/* -------------------------------------------------------- 项目详情 */}
       <section className="ws-main">
@@ -646,6 +660,20 @@ export function ProjectsPanel({
                 {detail.id}
               </span>
               <span className="spacer" />
+              {onEnterProject && (
+                <button
+                  className="btn btn-primary btn-tiny"
+                  disabled={detail.is_default}
+                  title={
+                    detail.is_default
+                      ? '默认项目没有任务库，新建项目后才能用任务'
+                      : '打开这个项目的任务文件夹'
+                  }
+                  onClick={() => onEnterProject(detail.id, 'tasks')}
+                >
+                  打开任务
+                </button>
+              )}
               {!projectEditing && !detail.is_default && (
                 <button
                   className="btn btn-ghost btn-tiny"

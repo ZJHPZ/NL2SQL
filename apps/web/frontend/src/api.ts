@@ -28,7 +28,10 @@ import type {
   TaskCreateResult,
   TaskDetail,
   TaskDetailResponse,
+  TaskFolderMutationResult,
+  TaskFoldersResponse,
   TaskListResponse,
+  TaskMoveResult,
   TaskRevisionsResponse,
   TaskRunResponse,
   TaskUpdateResult,
@@ -385,7 +388,13 @@ export const api = {
 
   createTask: (
     projectId: string,
-    payload: { name: string; sql: string; description?: string },
+    payload: {
+      name: string
+      sql: string
+      description?: string
+      folder?: string
+      kind?: 'sql' | 'pyspark'
+    },
   ) =>
     request<TaskCreateResult>(
       `/api/projects/${encodeURIComponent(projectId)}/tasks`,
@@ -406,6 +415,8 @@ export const api = {
       name?: string
       sql?: string
       description?: string
+      folder?: string
+      kind?: 'sql' | 'pyspark'
       note?: string
     },
   ) =>
@@ -446,6 +457,39 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
         `${encodeURIComponent(taskId)}/run`,
       { method: 'POST', body: '{}' },
+    ),
+
+  /** 把任务挪到另一个文件夹：只改归属，不生成新版本 */
+  moveTask: (projectId: string, taskId: string, folder: string) =>
+    request<TaskMoveResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/move`,
+      { method: 'POST', body: JSON.stringify({ folder }) },
+    ),
+
+  // ------------------------------------------------------------ 任务文件夹
+  taskFolders: (projectId: string) =>
+    request<TaskFoldersResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/task-folders`,
+    ),
+
+  createTaskFolder: (projectId: string, path: string) =>
+    request<TaskFolderMutationResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/task-folders`,
+      { method: 'POST', body: JSON.stringify({ path }) },
+    ),
+
+  renameTaskFolder: (projectId: string, path: string, newPath: string) =>
+    request<TaskFolderMutationResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/task-folders`,
+      { method: 'PUT', body: JSON.stringify({ path, new_path: newPath }) },
+    ),
+
+  deleteTaskFolder: (projectId: string, path: string) =>
+    request<TaskFolderMutationResult>(
+      `/api/projects/${encodeURIComponent(projectId)}/task-folders` +
+        `?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
     ),
 }
 

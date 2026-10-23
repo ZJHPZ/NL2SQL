@@ -4199,3 +4199,815 @@ table.grid th.sortable:focus-visible {
   outline: 2px solid var(--olive);
   outline-offset: -2px;
 }
+
+/* ==========================================================================
+   v9（2026-10-23）：主次层级 + 项目内导航 + 任务文件夹树
+   三处结构变化：
+     1. 左侧索引栏换成墨色「书脊」——纸页上的内容才有明暗对比与第一眼落点，
+        当前项是纸色印章块；朱红只做删除/错误，不做装饰。
+     2. 一级导航只有「工作台 / 项目」，进入项目后才在栏内展开「概览 / 任务」。
+     3. 任务改成 文件夹树 + 右键菜单 + 对话框；表格头/结论/证据各有自己的材质。
+   ========================================================================== */
+
+/* ---------- 1. 墨色书脊（左侧栏） ---------- */
+.rail {
+  background: var(--ink);
+  border-right: 0;
+  color: var(--paper);
+  scrollbar-color: rgba(244, 239, 226, .28) transparent;
+}
+
+.rail::-webkit-scrollbar-thumb {
+  background: rgba(244, 239, 226, .24);
+  border-color: var(--ink);
+}
+
+.rail .rail-brand {
+  border-bottom-color: rgba(244, 239, 226, .16);
+}
+
+.rail .brand-mark {
+  color: var(--paper);
+  border-color: rgba(244, 239, 226, .34);
+}
+
+.rail .brand-name,
+.rail .brand-sub {
+  color: var(--paper);
+}
+
+.rail .brand-sub {
+  color: rgba(244, 239, 226, .55);
+}
+
+.rail-nav .navbtn {
+  color: rgba(244, 239, 226, .60);
+}
+
+.rail-nav .nav-index {
+  color: rgba(244, 239, 226, .64);
+}
+
+.rail-nav .navbtn svg {
+  color: rgba(244, 239, 226, .50);
+}
+
+.rail-nav .navbtn:hover {
+  background: rgba(244, 239, 226, .08);
+  color: var(--paper);
+}
+
+/* 当前项 = 纸色印章块，是全页最亮的一块，第一眼落点 */
+.rail-nav .navbtn.active {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.rail-nav .navbtn.active .nav-index {
+  color: var(--vermilion);
+}
+
+.rail-nav .navbtn.active svg {
+  color: var(--olive);
+}
+
+.rail-nav .navbtn.active::after {
+  background: var(--vermilion);
+}
+
+/* 项目内二级导航：进入项目才出现，和一级导航拉开一档 */
+.rail-project {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: -16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(244, 239, 226, .16);
+}
+
+.rail-project-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 10px 8px;
+}
+
+.rail-project-kicker {
+  font-size: 9.5px;
+  letter-spacing: .18em;
+  color: rgba(244, 239, 226, .62);
+}
+
+.rail-project-name {
+  overflow: hidden;
+  font-family: var(--serif);
+  font-size: 15px;
+  color: var(--paper);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rail-subnav .navbtn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px 0 22px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: rgba(244, 239, 226, .66);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  box-shadow: none;
+}
+
+.rail-subnav .nav-index {
+  width: 18px;
+  flex: none;
+  color: rgba(244, 239, 226, .64);
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+
+.rail-subnav .navbtn svg {
+  color: rgba(244, 239, 226, .52);
+}
+
+.rail-subnav .navbtn:hover {
+  background: rgba(244, 239, 226, .08);
+  color: var(--paper);
+}
+
+.rail-subnav .navbtn.active {
+  background: rgba(244, 239, 226, .14);
+  color: var(--paper);
+}
+
+.rail-subnav .navbtn.active .nav-index {
+  color: var(--paper);
+}
+
+.rail-subnav .navbtn.active svg {
+  color: var(--ochre);
+}
+
+.rail-subnav .navbtn.active::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  background: var(--ochre);
+}
+
+.rail-back {
+  margin-top: 6px;
+  padding-left: 22px;
+  color: rgba(244, 239, 226, .60);
+  font-size: 12px;
+}
+
+.rail-back:hover {
+  color: var(--paper);
+}
+
+.rail-foot {
+  border-top-color: rgba(244, 239, 226, .16);
+}
+
+.rail .session-chip,
+.rail-env {
+  color: rgba(244, 239, 226, .62);
+}
+
+.rail .env-chip {
+  color: rgba(244, 239, 226, .66);
+}
+
+.rail .env-chip b {
+  color: rgba(244, 239, 226, .88);
+}
+
+.rail .badge {
+  background: rgba(244, 239, 226, .12);
+  color: rgba(244, 239, 226, .86);
+  border-color: transparent;
+}
+
+/* ---------- 2. 纸页上的层级：章节线、答案、证据、表头 ---------- */
+.page-head {
+  padding-bottom: 20px;
+  border-bottom: 2px solid var(--ink);
+  margin-bottom: 28px;
+}
+
+.page-title {
+  font-size: 38px;
+}
+
+/* 注记槽编号：朱红小字是「记录页」的页码，属于结构而非装饰 */
+.page > .gutter-tag,
+.page-stage > .gutter-tag {
+  color: var(--vermilion);
+  font-size: 10px;
+  letter-spacing: .18em;
+}
+
+.page > .gutter-tag::after,
+.page-stage > .gutter-tag::after {
+  background: var(--vermilion);
+  opacity: .35;
+}
+
+/* 舞台：标题再大一点，composer 用墨边 + 纸面错位投影当落点 */
+.stage-title {
+  font-size: 46px;
+  color: var(--ink);
+}
+
+.stage-accent {
+  color: var(--olive);
+}
+
+.stage-inner .composer {
+  border-color: var(--ink);
+  box-shadow: 4px 4px 0 var(--rule);
+}
+
+.stage-inner .composer:focus-within {
+  border-color: var(--olive);
+  box-shadow: 4px 4px 0 var(--olive-soft), 0 0 0 3px var(--olive-soft);
+}
+
+/* 结论 = 记录正文：去掉卡片壳，换成一张纸页的顶栏 */
+.answer {
+  padding: 20px 2px 8px;
+  background: transparent;
+  border: 0;
+  border-top: 2px solid var(--ink);
+  border-radius: 0;
+}
+
+.answer-head {
+  margin-bottom: 10px;
+}
+
+.answer-title {
+  color: var(--ink-3);
+}
+
+/* 证据（SQL/表格）比正文更「密」：纸色略深，表头用墨条压住 */
+.result {
+  background: var(--paper-2);
+}
+
+.result-toolbar {
+  border-bottom-color: var(--rule-mid);
+}
+
+table.grid thead th {
+  background: var(--ink);
+  color: rgba(244, 239, 226, .86);
+  border-bottom: 0;
+  letter-spacing: .04em;
+}
+
+table.grid thead th:hover {
+  background: var(--ink);
+}
+
+/* 序号列的表头也要墨条，否则头行左侧留一块纸色缺角 */
+table.grid thead th.rownum {
+  background: var(--ink);
+  color: rgba(244, 239, 226, .62);
+}
+
+table.grid td.num,
+table.grid td.mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状态条是页眉注记，不再是一张卡片 */
+.statusbar {
+  padding: 0 2px 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--rule-mid);
+  border-radius: 0;
+}
+
+.statusbar.tone-ok,
+.statusbar.tone-warn,
+.statusbar.tone-bad {
+  border-color: var(--rule-mid);
+}
+
+.status-notes {
+  border-top: 0;
+  padding-top: 8px;
+}
+
+/* SQL 面板：深一层的纸，和结论区分 */
+.sqlpanel {
+  background: var(--paper-2);
+  border-color: var(--rule-mid);
+}
+
+.sqlpanel .sqlpanel-editor {
+  background: var(--paper);
+}
+
+.work {
+  gap: 26px;
+}
+
+/* 主按钮 hover 用朱红，平时保持墨块（一个页面上只有这一个高饱和动作） */
+.btn-primary:hover {
+  background: var(--vermilion);
+  color: var(--paper);
+}
+
+.btn-primary:hover svg {
+  color: var(--paper);
+}
+
+/* ---------- 3. 顶栏项目上下文 ---------- */
+.topbar-project {
+  overflow: hidden;
+  max-width: 260px;
+  font-size: 11px;
+  letter-spacing: .02em;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-project::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--rule-strong);
+}
+
+/* ---------- 4. 项目列表进入态 ---------- */
+.workspace-detail {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ws-enter {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+}
+
+.ws-item:hover .ws-enter {
+  color: var(--vermilion);
+}
+
+/* ---------- 5. 任务：文件夹树 ---------- */
+.task-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.task-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--rule-mid);
+}
+
+.task-grid {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 34px;
+  align-items: start;
+}
+
+.task-side {
+  position: sticky;
+  top: calc(var(--topbar-h) + 16px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(100vh - var(--topbar-h) - 40px);
+  overflow: auto;
+}
+
+.task-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 1px 0 3px 14px;
+  list-style: none;
+  border-left: 1px solid var(--rule);
+  margin-left: 10px;
+}
+
+.tree-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--r-xs);
+}
+
+.tree-folder-row:hover {
+  background: var(--paper-2);
+}
+
+.tree-folder-row.active {
+  background: var(--paper-3);
+}
+
+.tree-root-row .tree-name {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.tree-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 30px;
+  background: transparent;
+  border: 0;
+  color: var(--ink-3);
+  font-size: 10px;
+}
+
+.tree-name {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+  height: 30px;
+  padding: 0 4px;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font-size: 13.5px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-name .mono {
+  font-size: 12.5px;
+}
+
+.tree-count {
+  color: var(--ink-3);
+  font-size: 10px;
+}
+
+.folder-menu-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: var(--ink-3);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.tree-folder-row:hover .folder-menu-btn,
+.folder-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.folder-menu-btn:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.tree-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 6px 0 24px;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: var(--ink-2);
+  font-size: 13px;
+  text-align: left;
+}
+
+.tree-task:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+.tree-task.active {
+  background: var(--paper-3);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.kind-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  background: var(--olive);
+  border-radius: 1px;
+}
+
+.kind-dot.kind-pyspark {
+  background: var(--ochre);
+  border-radius: 50%;
+}
+
+.tree-task.active .kind-dot {
+  background: var(--vermilion);
+}
+
+.tree-task-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-task-meta {
+  flex: none;
+  color: var(--ink-2);
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+.tree-hint {
+  padding-left: 2px;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+/* ---------- 6. 任务：记录页 ---------- */
+.task-main {
+  min-height: 420px;
+  padding: 26px 30px;
+  background: var(--surface-1);
+  border: 1px solid var(--rule-mid);
+  border-radius: var(--r-md);
+}
+
+.task-main .detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid var(--ink);
+  margin-bottom: 18px;
+}
+
+.task-main .detail-title {
+  font-size: 26px;
+}
+
+.task-main .section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.task-main .field-grid {
+  gap: 12px 18px;
+}
+
+.field textarea {
+  height: auto;
+  padding: 10px 12px;
+  line-height: 1.7;
+}
+
+.field textarea.sql-editor {
+  width: 100%;
+  min-height: 220px;
+  font-size: 12.5px;
+}
+
+.task-main .form-actions {
+  margin-top: 14px;
+}
+
+.task-main .rev-list {
+  margin-top: 4px;
+}
+
+.task-main .rev-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ---------- 7. 右键菜单 ---------- */
+.ctx-menu {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 216px;
+  padding: 6px;
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-pop);
+}
+
+.ctx-title {
+  padding: 6px 10px 8px;
+  margin-bottom: 4px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink-3);
+  font-size: 10px;
+  letter-spacing: .12em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  height: 34px;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+}
+
+.ctx-item:hover {
+  background: var(--paper-2);
+}
+
+.ctx-item.ctx-danger {
+  color: var(--vermilion);
+}
+
+.ctx-item.ctx-danger:hover {
+  background: var(--vermilion-soft);
+}
+
+.ctx-hint {
+  color: var(--ink-3);
+  font-size: 10px;
+}
+
+/* ---------- 8. 对话框 ---------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 72px 16px 40px;
+  overflow: auto;
+  background: rgba(27, 24, 18, .40);
+}
+
+.modal {
+  width: 100%;
+  max-width: 660px;
+  padding: 22px 26px 24px;
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-md);
+  box-shadow: 0 28px 70px -28px rgba(27, 24, 18, .45);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.modal-head b {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -.015em;
+}
+
+.modal .field-grid {
+  gap: 12px 18px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+}
+
+/* ---------- 9. 新结构的响应式 ---------- */
+@media (max-width: 1180px) {
+  .task-grid {
+    grid-template-columns: 250px minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .page-title {
+    font-size: 34px;
+  }
+
+  .stage-title {
+    font-size: 40px;
+  }
+}
+
+@media (max-width: 900px) {
+  .task-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-side {
+    position: static;
+    max-height: none;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--rule-mid);
+  }
+
+  .task-main {
+    min-height: 0;
+    padding: 20px 20px 24px;
+  }
+
+  .task-main .detail-title {
+    font-size: 23px;
+  }
+
+  .page-title {
+    font-size: 29px;
+  }
+
+  .stage-title {
+    font-size: 33px;
+  }
+}
+
+@media (max-width: 640px) {
+  .task-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .task-main {
+    padding: 16px 14px 20px;
+  }
+
+  .modal {
+    padding: 18px 16px;
+  }
+
+  .modal-backdrop {
+    padding: 18px 10px 32px;
+  }
+
+  .page-title {
+    font-size: 26px;
+  }
+
+  .stage-title {
+    font-size: 28px;
+  }
+}

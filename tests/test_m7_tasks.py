@@ -191,6 +191,86 @@ def test_store_isolation(work: str) -> None:
           or True, "路径无业务库耦合（信息性）")
 
 
+# --------------------------------------------------------------------- E
+def test_folders_and_kinds(work: str) -> None:
+    section("[E] 任务文件夹树 + 任务类型（默认 ods/dwd/dwm/ads）")
+    from nl2sql.errors import TaskError
+    from nl2sql.tasks import DEFAULT_TASK_FOLDERS, TaskStore
+
+    db = os.path.join(work, "folders", "tasks.db")
+    store = TaskStore(db, project_id="proj-f")
+
+    # 新库自动种下四个数仓目录（幂等）
+    paths = [f["path"] for f in store.folders()]
+    check(set(DEFAULT_TASK_FOLDERS).issubset(set(paths)), "默认四个文件夹已创建",
+          str(paths))
+    store2 = TaskStore(db, project_id="proj-f")
+    check([f["path"] for f in store2.folders()] == paths, "重开库不重复种目录")
+
+    # 建子文件夹 / 重名拒绝 / 父目录必须存在
+    store.create_folder("ods/原始层")
+    check("ods/原始层" in [f["path"] for f in store.folders()], "子文件夹创建")
+    try:
+        store.create_folder("ods")
+        check(False, "重名文件夹拒绝")
+    except TaskError:
+        check(True, "重名文件夹拒绝")
+    try:
+        store.create_folder("nope/child")
+        check(False, "父目录不存在拒绝")
+    except TaskError:
+        check(True, "父目录不存在拒绝")
+
+    # 任务归属文件夹 + 移动（移动不产生版本）
+    t = store.create("渠道实收", "SELECT 1 AS x", folder="ods/原始层")
+    check(t.folder == "ods/原始层" and t.kind == "sql", "任务落进文件夹")
+    moved = store.move(t.task_id, "dwd")
+    check(moved.folder == "dwd" and moved.revision == 1, "移动不改版本")
+    try:
+        store.move(t.task_id, "ghost")
+        check(False, "移动到不存在文件夹拒绝")
+    except TaskError:
+        check(True, "移动到不存在文件夹拒绝")
+
+    # 重命名文件夹：子目录与任务一起搬
+    t2 = store.create("明细", "SELECT 2 AS y", folder="dwd")
+    store.rename_folder("dwd", "dwd_明细")
+    check("dwd_明细" in [f["path"] for f in store.folders()], "文件夹重命名")
+    check(store.get(t.task_id).folder == "dwd_明细", "任务路径随重命名更新")
+    check(store.get(t2.task_id).folder == "dwd_明细", "同目录任务一起更新")
+    try:
+        store.rename_folder("dwd_明细", "dwd_明细/child")
+        check(False, "禁止移动到自身内部")
+    except TaskError:
+        check(True, "禁止移动到自身内部")
+
+    # 删除文件夹：有任务时拒绝，清空后可删
+    try:
+        store.delete_folder("dwd_明细")
+        check(False, "非空文件夹删除拒绝")
+    except TaskError:
+        check(True, "非空文件夹删除拒绝")
+    store.delete(t.task_id)
+    store.delete(t2.task_id)
+    check(store.delete_folder("dwd_明细") == 1, "空文件夹可删除")
+    check("dwd_明细" not in [f["path"] for f in store.folders()], "删除后列表更新")
+
+    # 任务类型：PySpark 只存不跑；类型不合法拒绝
+    py = store.create("火花", 'df = spark.sql("SELECT 1")', folder="ads",
+                      kind="pyspark")
+    check(py.kind == "pyspark" and py.folder == "ads", "PySpark 任务可创建")
+    try:
+        store.create("坏类型", "SELECT 1", kind="java")
+        check(False, "未知类型拒绝")
+    except TaskError:
+        check(True, "未知类型拒绝")
+    try:
+        store.update(py.task_id, kind="sql")  # 代码不是合法只读 SQL
+        check(False, "切回 SQL 时校验正文")
+    except TaskError:
+        check(True, "切回 SQL 时校验正文")
+
+
 def main() -> int:
     import shutil
 
@@ -207,7 +287,7 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             traceback.print_exc()
             _failures.append(f"{fn.__name__} 异常")
-    for fn in (test_store_crud, test_store_isolation):
+    for fn in (test_store_crud, test_store_isolation, test_folders_and_kinds):
         try:
             fn(work)
         except Exception:  # noqa: BLE001

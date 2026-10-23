@@ -273,6 +273,10 @@ class TaskCreateRequest(BaseModel):
     description: str = Field(default="", max_length=1000)
     tags: list[str] = Field(default_factory=list)
     source_id: str | None = None
+    folder: str = Field(default="", max_length=200, description="任务所在文件夹路径")
+    kind: Literal["sql", "pyspark"] = Field(
+        default="sql", description="任务类型：sql 可运行；pyspark 暂只保存代码"
+    )
 
     _v_name = field_validator("name")(_must_not_be_blank)
     _v_sql = field_validator("sql")(_must_not_be_blank)
@@ -285,7 +289,27 @@ class TaskUpdateRequest(BaseModel):
     tags: list[str] | None = None
     enabled: bool | None = None
     source_id: str | None = None
+    folder: str | None = Field(default=None, max_length=200)
+    kind: Literal["sql", "pyspark"] | None = None
     note: str = Field(default="", max_length=500)
+
+
+class TaskMoveRequest(BaseModel):
+    folder: str = Field(default="", max_length=200)
+
+
+class TaskFolderCreateRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=200)
+
+    _v_path = field_validator("path")(_must_not_be_blank)
+
+
+class TaskFolderRenameRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=200)
+    new_path: str = Field(..., min_length=1, max_length=200)
+
+    _v_path = field_validator("path")(_must_not_be_blank)
+    _v_new = field_validator("new_path")(_must_not_be_blank)
 
 
 class TaskRunRequest(BaseModel):
