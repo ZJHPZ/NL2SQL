@@ -569,3 +569,73 @@ export interface AdminStats {
   planner_mode: string
   runtime: string
 }
+
+// ================================================================ 流式问答（SSE）
+/* `GET /api/query/stream` 的进度事件。
+ *
+ * 与 `nl2sql/agent/machine.py` 里的 emit 调用一一对应；`result` 帧的载荷
+ * 就是 POST /api/query 的响应体（QueryResponse），因此两种调用可以共用渲染。
+ * 事件不保证每轮都出现（例如纯主链路一步到位时只有 start/result/done）。
+ */
+export interface StreamStartEvent {
+  question: string
+  session_id: string | null
+}
+
+export interface StreamDecisionEvent {
+  step: number
+  /** tool = 调用工具；final = 给出结论；clarify = 追问 */
+  kind: string
+  tool?: string | null
+  thought?: string | null
+  elapsed_ms: number
+}
+
+export interface StreamToolEvent {
+  step: number
+  tool: string
+  ok: boolean
+  elapsed_ms: number
+  /** 工具观察值摘要（后端截断到 400 字符） */
+  observation?: string | null
+}
+
+export interface StreamGuardEvent {
+  step: number
+  /** nodata / narration / deferred / repeat —— 模型行为被机制顶回去 */
+  rule: string
+}
+
+export interface StreamClarifyEvent {
+  step: number
+  question: string
+}
+
+export interface StreamOutcomeEvent {
+  status: QueryStatus
+  elapsed_ms: number
+  notes: string[]
+}
+
+/** model_retry / model_repair / tool_missing 这类内部修复事件的公共形状 */
+export interface StreamRepairEvent {
+  step: number
+  attempt?: number
+  tool?: string
+  reason?: string
+  [key: string]: unknown
+}
+
+export type StreamEvent =
+  | { event: 'start'; data: StreamStartEvent }
+  | { event: 'decision'; data: StreamDecisionEvent }
+  | { event: 'tool'; data: StreamToolEvent }
+  | { event: 'guard'; data: StreamGuardEvent }
+  | { event: 'clarify'; data: StreamClarifyEvent }
+  | { event: 'outcome'; data: StreamOutcomeEvent }
+  | { event: 'model_retry'; data: StreamRepairEvent }
+  | { event: 'model_repair'; data: StreamRepairEvent }
+  | { event: 'tool_missing'; data: StreamRepairEvent }
+  | { event: 'result'; data: QueryResponse }
+  | { event: 'done'; data: Record<string, unknown> }
+  | { event: 'error'; data: { message: string } }

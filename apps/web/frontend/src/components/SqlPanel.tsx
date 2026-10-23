@@ -72,6 +72,7 @@ export function SqlPanel({
       </div>
       <textarea
         className="sqlpanel-editor mono"
+        aria-label="SQL 语句（可编辑后重跑）"
         value={text}
         spellCheck={false}
         rows={Math.min(18, Math.max(3, text.split('\n').length))}

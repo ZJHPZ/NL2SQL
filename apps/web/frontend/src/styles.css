@@ -13,6 +13,9 @@
   --text: #dfe3ea;
   --text-dim: #9aa3b2;
   --accent: #4c8dff;
+  /* 实心按钮上放白字时，#4c8dff 的对比度只有 3.2（WCAG AA 要求 4.5），
+     所以另设一个更深的强调色专用于「填充背景」场景。 */
+  --accent-strong: #2f6fe0;
   --ok: #3fb950;
   --warn: #d29922;
   --bad: #f85149;
@@ -81,7 +84,8 @@ body {
 }
 .btn:hover:not(:disabled) { border-color: var(--accent); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+.btn-primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; font-weight: 500; }
+.btn-primary:hover:not(:disabled) { background: #2b68d6; border-color: #2b68d6; }
 .btn-ghost { background: transparent; }
 .btn-tiny { padding: 2px 7px; font-size: 11px; }
 .linkbtn {
@@ -585,3 +589,142 @@ table.grid tbody tr:hover td { background: rgba(76,141,255,.06); }
   }
   .field-grid { grid-template-columns: 1fr; }
 }
+
+/* ================================================================ P0 体验优化 */
+/* 深色精修：不换主题，只补四类东西——
+   流式进度、骨架屏、Markdown 回答、可访问性（landmark/焦点/减少动效）。 */
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.skip-link {
+  position: absolute; left: 8px; top: -48px; z-index: 100;
+  padding: 8px 14px; border-radius: 0 0 6px 6px;
+  background: var(--accent); color: #fff; font-size: 13px;
+  text-decoration: none; transition: top .15s ease;
+}
+.skip-link:focus { top: 0; }
+
+/* 键盘可达性：默认焦点框在深色底上几乎不可见 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:focus-visible, .navbtn:focus-visible, .tab:focus-visible { outline-offset: 1px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 1px; }
+
+/* ask 视图的主 landmark：包住提问栏 + 工作区，保证 Skip link 可落点 */
+.ask-main {
+  display: flex; flex-direction: column;
+  flex: 1; min-height: 0; overflow: hidden;
+}
+
+.btn svg { margin-right: 5px; vertical-align: -2px; }
+.btn-primary svg { margin-right: 5px; vertical-align: -2px; }
+.btn-cancel { border-color: var(--bad); color: var(--bad); }
+.btn-cancel:hover:not(:disabled) {
+  background: rgba(248,81,73,.12); border-color: var(--bad);
+}
+
+/* ---------- 流式进度时间线 */
+.stream-box { margin-bottom: 12px; }
+.stream-timeline {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 9px 12px; margin-bottom: 12px;
+  background: var(--bg-soft);
+}
+.stream-timeline.compact {
+  margin: 8px 0 0; border: none; padding: 4px 2px; background: none;
+}
+.stream-head { display: flex; align-items: center; gap: 8px; }
+.stream-title { font-size: 12px; font-weight: 600; color: var(--accent); }
+.stage-list { list-style: none; margin: 7px 0 0; padding: 0; }
+.stage {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 0; font-size: 12.5px; line-height: 1.5;
+}
+.stage-icon { flex: none; position: relative; top: 2px; }
+.stage-icon-active { color: var(--accent); }
+.stage-icon-done { color: var(--ok); }
+.stage-icon-warn { color: var(--warn); }
+.stage-icon-error { color: var(--bad); }
+.stage-label { color: var(--text); }
+.stage-detail { color: var(--text-dim); overflow-wrap: anywhere; }
+.stage-warn .stage-label { color: var(--warn); }
+.stage-error .stage-label { color: var(--bad); }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.stream-done { margin-bottom: 12px; }
+.stream-done > summary {
+  cursor: pointer; font-size: 12px; color: var(--text-dim);
+  padding: 3px 0; list-style-position: inside;
+}
+.stream-done > summary:hover { color: var(--text); }
+
+/* ---------- 首轮骨架屏 */
+.skeleton-card {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 14px 16px; background: var(--bg-soft);
+}
+.skeleton-line, .skeleton-cell {
+  display: block; height: 12px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg-raise) 25%, var(--border) 37%, var(--bg-raise) 63%);
+  background-size: 400% 100%;
+  animation: skeleton 1.4s ease infinite;
+}
+.skeleton-line { margin-bottom: 9px; }
+.skeleton-w60 { width: 60%; }
+.skeleton-w90 { width: 90%; }
+.skeleton-w75 { width: 75%; }
+.skeleton-table { margin-top: 15px; display: flex; flex-direction: column; gap: 8px; }
+.skeleton-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.skeleton-cell { height: 22px; }
+@keyframes skeleton { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
+/* ---------- Markdown 回答 */
+.md { line-height: 1.7; word-break: break-word; }
+/* 父类 .answer-body 原本是 pre-wrap（纯文本用），Markdown 下要关掉，
+   否则 marked 输出里块级标签之间的换行会变成可见空行 */
+.md.answer-body { white-space: normal; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 8px; }
+.md ul, .md ol { margin: 4px 0 9px; padding-left: 22px; }
+.md li { margin: 2px 0; }
+.md strong { color: var(--text); font-weight: 600; }
+.md code {
+  font-family: var(--mono); font-size: 12px;
+  padding: 1px 5px; border-radius: 4px;
+  background: var(--bg-raise); border: 1px solid var(--border);
+}
+.md pre {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 9px 11px; overflow: auto; margin: 8px 0;
+}
+.md pre code { padding: 0; background: none; border: none; }
+.md a { color: var(--accent); }
+.md table { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
+.md th, .md td { border: 1px solid var(--border); padding: 5px 9px; }
+.md blockquote {
+  margin: 8px 0; padding: 2px 12px;
+  border-left: 3px solid var(--border); color: var(--text-dim);
+}
+.md h1, .md h2, .md h3, .md h4 { margin: 10px 0 6px; line-height: 1.4; }
+.md h1 { font-size: 17px; }
+.md h2 { font-size: 16px; }
+.md h3 { font-size: 15px; }
+
+/* ---------- 减少动效：尊重系统设置 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+  .spin { animation: none; }
+}
+
+/* ---------- 启动失败页 */
+.boot-error h1 { margin-top: 0; }

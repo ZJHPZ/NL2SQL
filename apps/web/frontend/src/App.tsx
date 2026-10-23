@@ -7,7 +7,14 @@
  * 这个稳定对象，滚两下就找不到刚才的结果了。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, getProjectId, setProjectId } from './api'
+import {
+  MessageSquarePlus,
+  RefreshCw,
+  Search,
+  Table2,
+  X,
+} from 'lucide-react'
+import { api, getProjectId, setProjectId, streamQuery } from './api'
 import type {
   HistoryItem,
   InfoResponse,
@@ -15,8 +22,12 @@ import type {
   KnowledgeItem,
   ProjectSummary,
   QueryResponse,
+  StreamEvent,
   TableInfo,
 } from './types'
+import { Markdown } from './components/Markdown'
+import { QuerySkeleton, StreamTimeline } from './components/QueryProgress'
+import type { StageStep } from './components/QueryProgress'
 import { ResultTable } from './components/ResultTable'
 import { SqlPanel } from './components/SqlPanel'
 import { StatusBar } from './components/StatusBar'
@@ -48,6 +59,110 @@ const RUNTIME_LABEL: Record<string, string> = {
   langgraph: 'LangGraph',
 }
 
+/** 护栏规则的中文说法：让用户看懂"模型被机制顶回去了"是什么情况。 */
+const GUARD_LABEL: Record<string, string> = {
+  nodata: '还没查数据就想下结论，被要求先执行查询',
+  narration: '输出像旁白而不是结论，被要求给出最终答案',
+  deferred: '把关键步骤推给"下一步"，被要求现在做完',
+  repeat: '重复调用同一个工具，被要求换做法',
+}
+
+/** QueryStatus 的中文短名（进度时间线与状态条共用口径）。 */
+const OUTCOME_LABEL: Record<string, string> = {
+  ok: '完成',
+  empty: '没有数据',
+  truncated: '结果被截断',
+  unresolved: '未能解析',
+  invalid_sql: 'SQL 不合法',
+  blocked: '被安全策略拦截',
+  timeout: '超时',
+  error: '执行失败',
+  need_clarification: '需要补充信息',
+}
+
+/** 把一条 SSE 事件翻译成一行可读进度；result/done 不产生进度行。 */
+function streamStage(ev: StreamEvent): StageStep | null {
+  switch (ev.event) {
+    case 'start':
+      return { key: 'start', label: '已连上查询引擎，开始规划', state: 'done' }
+    case 'decision': {
+      const { step, kind, tool, thought } = ev.data
+      if (kind === 'tool') {
+        return {
+          key: `decision-${step}`,
+          label: `第 ${step} 步：决定调用工具`,
+          detail: tool ?? '',
+          state: 'done',
+        }
+      }
+      if (kind === 'final') {
+        return {
+          key: `decision-${step}`,
+          label: `第 ${step} 步：整理最终结论`,
+          state: 'done',
+        }
+      }
+      return {
+        key: `decision-${step}`,
+        label: `第 ${step} 步：${kind}`,
+        detail: thought ?? undefined,
+        state: 'done',
+      }
+    }
+    case 'tool':
+      return {
+        key: `tool-${ev.data.step}`,
+        label: `执行 ${ev.data.tool}`,
+        detail: `${ev.data.ok ? '成功' : '失败'} · ${(ev.data.elapsed_ms / 1000).toFixed(1)}s`,
+        state: ev.data.ok ? 'done' : 'warn',
+      }
+    case 'guard':
+      return {
+        key: `guard-${ev.data.step}-${ev.data.rule}`,
+        label: '护栏纠正模型行为',
+        detail: GUARD_LABEL[ev.data.rule] ?? ev.data.rule,
+        state: 'warn',
+      }
+    case 'clarify':
+      return {
+        key: `clarify-${ev.data.step}`,
+        label: '需要你补充信息',
+        detail: ev.data.question,
+        state: 'warn',
+      }
+    case 'outcome': {
+      const notes = ev.data.notes ?? []
+      return {
+        key: 'outcome',
+        label: `执行结束：${OUTCOME_LABEL[ev.data.status] ?? ev.data.status}`,
+        detail: notes.length > 0 ? notes[notes.length - 1] : undefined,
+        state: ev.data.status === 'ok' ? 'done' : 'warn',
+      }
+    }
+    case 'model_retry':
+      return {
+        key: `retry-${ev.data.step}-${ev.data.attempt ?? ''}`,
+        label: '模型调用重试',
+        detail: `第 ${ev.data.attempt ?? '?'} 次尝试`,
+        state: 'warn',
+      }
+    case 'model_repair':
+      return { key: `repair-${ev.data.step}`, label: '模型输出格式修复', state: 'warn' }
+    case 'tool_missing':
+      return {
+        key: `missing-${ev.data.step}`,
+        label: '模型漏了工具名，要求重新选择',
+        detail: ev.data.tool ?? undefined,
+        state: 'warn',
+      }
+    case 'error':
+      return { key: 'error', label: '运行时异常', detail: ev.data.message, state: 'error' }
+    case 'result':
+    case 'done':
+      return null
+  }
+}
+
 export default function App() {
   const [info, setInfo] = useState<InfoResponse | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
@@ -57,6 +172,10 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [data, setData] = useState<QueryResponse | null>(null)
   const [reqError, setReqError] = useState<string | null>(null)
+  // 流式进度：steps 从 SSE 事件累积而来，elapsedMs 由计时器推进
+  const [stages, setStages] = useState<StageStep[]>([])
+  const [elapsedMs, setElapsedMs] = useState(0)
+  const abortRef = useRef<AbortController | null>(null)
 
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [tables, setTables] = useState<TableInfo[]>([])
@@ -159,20 +278,68 @@ export default function App() {
   )
 
   // ---------------------------------------------------------------- 动作
+  /** 提问：走 SSE 流式接口。
+   *
+   * 为什么不用一次性 POST：agent 一次问答 2~10 秒，界面必须一连接上就有反馈。
+   * 事件按顺序推到 `stages`，用户能看到"选工具 → 执行 → 整理"每一步，
+   * 而且首字节是后端**立即**发的（不等模型），空窗期从数秒降到几十毫秒。
+   */
   const runQuery = async (override?: string) => {
     const q = (override ?? question).trim()
     if (!q || busy) return
     setBusy(true)
     setReqError(null)
-    const r = await api.query({
-      question: q,
-      source_id: info?.default_source ?? null,
-      // agent 模式下时间锚点由会话保留，这里仍传首轮锚点
-      now: now || null,
-      session_id: sessionId,
-    })
+    setStages([])
+    setElapsedMs(0)
+
+    // 本地数组累积后再整体 set：避免连续事件下多次浅拷贝打断 React 批处理
+    const local: StageStep[] = []
+    const push = (s: StageStep) => {
+      const i = local.findIndex((x) => x.key === s.key)
+      if (i >= 0) local[i] = s
+      else local.push(s)
+      setStages([...local])
+    }
+
+    const controller = new AbortController()
+    abortRef.current = controller
+    const startedAt = performance.now()
+    const timer = window.setInterval(() => {
+      setElapsedMs(performance.now() - startedAt)
+    }, 120)
+
+    const r = await streamQuery(
+      {
+        question: q,
+        source_id: info?.default_source ?? null,
+        // agent 模式下时间锚点由会话保留，这里仍传首轮锚点
+        now: now || null,
+        session_id: sessionId,
+      },
+      {
+        signal: controller.signal,
+        onEvent: (ev) => {
+          const stage = streamStage(ev)
+          if (stage) push(stage)
+        },
+      },
+    )
+
+    window.clearInterval(timer)
+    abortRef.current = null
+    setElapsedMs(performance.now() - startedAt)
     setBusy(false)
+
     if (!r.ok) {
+      if (r.error.error === 'aborted') {
+        // 用户主动取消不是错误：不弹红色告警，只在进度里说明
+        push({
+          key: 'canceled',
+          label: '已取消（后端线程仍会跑完，本次结果不进入界面）',
+          state: 'warn',
+        })
+        return
+      }
       setReqError(`${r.error.error}: ${r.error.detail}`)
       return
     }
@@ -181,6 +348,14 @@ export default function App() {
     if (r.data.session_id) setSessionId(r.data.session_id)
     void reloadSide()
   }
+
+  /** 取消当前流式查询：立刻恢复可操作，不再等结果。 */
+  const cancelQuery = () => {
+    abortRef.current?.abort()
+  }
+
+  // 卸载时中断进行中的流，避免对已卸载组件 setState
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   /** 从澄清选项里选一个作为回答。 */
   const answerClarification = (text: string) => {
@@ -249,7 +424,7 @@ export default function App() {
   if (bootError) {
     return (
       <div className="boot-error">
-        <h2>后端未就绪</h2>
+        <h1>后端未就绪</h1>
         <pre>{bootError}</pre>
       </div>
     )
@@ -257,6 +432,9 @@ export default function App() {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main-content">
+        跳到主内容
+      </a>
       <header className="topbar">
         <div className="brand">
           talk-to-sql
@@ -351,18 +529,24 @@ export default function App() {
         )}
         <button className="btn btn-ghost" onClick={newSession}
                 title="清空当前会话，开始新的对话（旧上下文不再带入）">
+          <MessageSquarePlus size={14} aria-hidden="true" />
           新会话
         </button>
-        <button className="btn btn-ghost" onClick={() => setShowTables((v) => !v)}>
+        <button className="btn btn-ghost" onClick={() => setShowTables((v) => !v)}
+                aria-expanded={showTables}>
+          <Table2 size={14} aria-hidden="true" />
           {showTables ? '隐藏表结构' : '查看表结构'}
         </button>
         <button className="btn btn-ghost" onClick={refreshAll} title="刷新元数据快照并清空结果缓存">
+          <RefreshCw size={14} aria-hidden="true" />
           刷新快照/缓存
         </button>
       </header>
 
       {view === 'ask' && (
         <>
+      <main id="main-content" className="ask-main" aria-busy={busy}>
+      <h1 className="visually-hidden">talk-to-sql 查询工作台</h1>
       {/* 引擎装配失败：必须把**原因原文**摆出来。
           早先这种情况只显示"核心引擎未就绪"，用户完全不知道是哪个文件写错了
           （比如 dbt 指标文件路径写错），只能去翻服务端日志。 */}
@@ -384,7 +568,9 @@ export default function App() {
       )}
 
       <div className="askbar">
+        <label className="visually-hidden" htmlFor="ask-input">自然语言问题</label>
         <input
+          id="ask-input"
           className="ask-input"
           value={question}
           placeholder="用自然语言问一句，例如：2024年6月，数码品类的实收金额是多少？"
@@ -396,17 +582,31 @@ export default function App() {
             }
           }}
         />
-        <label className="nowfield" title="相对时间锚点：让「本月/上月」有确定含义，且可复现">
+        <label className="nowfield" htmlFor="now-input"
+               title="相对时间锚点：让「本月/上月」有确定含义，且可复现">
           时间锚点
-          <input value={now} onChange={(e) => setNow(e.target.value)} />
+          <input id="now-input" value={now} onChange={(e) => setNow(e.target.value)} />
         </label>
-        <button className="btn btn-primary" disabled={busy || !question.trim()}
-                onClick={() => void runQuery()}>
-          {busy ? '查询中…' : '查询'}
-        </button>
+        {busy ? (
+          <button className="btn btn-cancel" onClick={cancelQuery}
+                  title="取消本次查询（后端线程仍会跑完，结果不再进入界面）">
+            <X size={14} aria-hidden="true" />
+            取消
+          </button>
+        ) : (
+          <button className="btn btn-primary" disabled={!question.trim()}
+                  onClick={() => void runQuery()}>
+            <Search size={14} aria-hidden="true" />
+            查询
+          </button>
+        )}
       </div>
 
-      {reqError && <div className="alert alert-bad">{reqError}</div>}
+      {reqError && (
+        <div className="alert alert-bad" role="alert">
+          {reqError}
+        </div>
+      )}
 
       {showTables && (
         <div className="tables-panel">
@@ -467,7 +667,30 @@ export default function App() {
             </div>
           )}
 
-          {busy && !data && <div className="loading">正在查询…</div>}
+          {/* 屏幕阅读器播报：视觉进度条本身 aria-live，但结果状态也要读出来 */}
+          <div className="visually-hidden" role="status" aria-live="polite">
+            {busy
+              ? '正在查询'
+              : data
+                ? `查询完成：${OUTCOME_LABEL[data.status] ?? data.status}`
+                : ''}
+          </div>
+
+          {busy && (
+            <div className="stream-box">
+              <StreamTimeline steps={stages} elapsedMs={elapsedMs} />
+              {!data && <QuerySkeleton />}
+            </div>
+          )}
+
+          {!busy && stages.length > 0 && (
+            <details className="stream-done">
+              <summary>
+                执行过程（{stages.length} 步 · {(elapsedMs / 1000).toFixed(1)}s）
+              </summary>
+              <StreamTimeline steps={stages} elapsedMs={elapsedMs} compact />
+            </details>
+          )}
 
           {data && (
             <>
@@ -481,7 +704,7 @@ export default function App() {
                       智能体的自然语言回答；下方结果表是同一份数据的明细
                     </span>
                   </div>
-                  <div className="answer-body">{data.answer}</div>
+                  <Markdown className="answer-body" text={data.answer} />
                 </div>
               )}
               <SqlPanel sql={data.sql} onRerun={rerunSql} busy={busy} />
@@ -542,11 +765,13 @@ export default function App() {
           {tab === 'admin' && <PluginAdminPanel />}
         </aside>
       </div>
+      </main>
         </>
       )}
 
       {view === 'projects' && (
-        <main className="main">
+        <main id="main-content" className="main">
+          <h1 className="visually-hidden">项目管理与数据源</h1>
           <ProjectsPanel
             key={projectId}
             projectId={projectId}
@@ -557,7 +782,8 @@ export default function App() {
       )}
 
       {view === 'tasks' && (
-        <main className="main">
+        <main id="main-content" className="main">
+          <h1 className="visually-hidden">SQL 任务</h1>
           <TasksPanel
             key={projectId}
             projectId={projectId}

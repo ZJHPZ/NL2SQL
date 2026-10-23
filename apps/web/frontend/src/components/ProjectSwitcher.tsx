@@ -28,10 +28,11 @@ export function ProjectSwitcher({
   const known = projects.some((p) => p.id === projectId)
   return (
     <div className="project-switcher" title={error ?? '切换项目：项目隔离数据源与 SQL 任务'}>
-      <span className="meta">项目</span>
+      <span className="meta" id="project-switcher-label">项目</span>
       {projects.length > 0 ? (
         <select
           className="project-select"
+          aria-labelledby="project-switcher-label"
           value={projectId}
           disabled={loading}
           onChange={(e) => onChange(e.target.value)}
@@ -49,7 +50,12 @@ export function ProjectSwitcher({
           ))}
         </select>
       ) : (
-        <select className="project-select" value={projectId} disabled>
+        <select
+          className="project-select"
+          aria-labelledby="project-switcher-label"
+          value={projectId}
+          disabled
+        >
           <option value={projectId}>{projectId}</option>
         </select>
       )}

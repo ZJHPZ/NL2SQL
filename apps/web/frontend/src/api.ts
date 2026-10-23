@@ -23,6 +23,7 @@ import type {
   SourceSnapshotResult,
   SourceTablesResult,
   SourceTestResult,
+  StreamEvent,
   TableInfo,
   TaskCreateResult,
   TaskDetail,
@@ -446,4 +447,152 @@ export const api = {
         `${encodeURIComponent(taskId)}/run`,
       { method: 'POST', body: '{}' },
     ),
+}
+
+// ================================================================ 流式问答（SSE）
+/** 解析一个 SSE 帧（帧内若干 `event:` / `data:` 行，调用方已按空行切好）。 */
+function parseSseFrame(raw: string): { event: string; data: unknown } | null {
+  let event = 'message'
+  const dataLines: string[] = []
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line || line.startsWith(':')) continue // 注释行（心跳）忽略
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).replace(/^ /, '')) // 规范允许一个前导空格
+    }
+  }
+  if (dataLines.length === 0) return null
+  const text = dataLines.join('\n')
+  try {
+    return { event, data: JSON.parse(text) }
+  } catch {
+    return { event, data: text }
+  }
+}
+
+export interface StreamQueryPayload {
+  question: string
+  source_id?: string | null
+  now?: string | null
+  use_cache?: boolean | null
+  session_id?: string | null
+}
+
+export interface StreamQueryOptions {
+  /** 每个进度事件回调一次；抛出异常不会影响主流程（这里兜住） */
+  onEvent?: (ev: StreamEvent) => void
+  /** 取消：abort() 后立即停止读取。后端查询线程仍会跑完（见后端注释），
+   *  但界面不再等待结果——对用户来说"取消"就是立刻可继续操作。 */
+  signal?: AbortSignal
+}
+
+/** 流式问答。
+ *
+ * 与 `request()` 的区别：响应是 `text/event-stream`，要自己读 body 逐帧解析，
+ * 不能 `res.text()` 一次性等完（那样等于退化成非流式）。
+ * 返回值与 POST /api/query 同构（`result` 帧的载荷），失败同样返回 ApiResult。
+ */
+export async function streamQuery(
+  payload: StreamQueryPayload,
+  opts: StreamQueryOptions = {},
+): Promise<ApiResult<QueryResponse>> {
+  try {
+    const params = new URLSearchParams({ question: payload.question })
+    if (payload.source_id) params.set('source_id', payload.source_id)
+    if (payload.now) params.set('now', payload.now)
+    if (payload.session_id) params.set('session_id', payload.session_id)
+    if (payload.use_cache === false) params.set('use_cache', 'false')
+
+    const res = await fetch(`${BASE}/api/query/stream?${params.toString()}`, {
+      headers: { 'X-Project-Id': getProjectId() },
+      signal: opts.signal,
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return {
+        ok: false,
+        error: {
+          error: `http_${res.status}`,
+          detail: readableDetail(text.slice(0, 300), `HTTP ${res.status}`),
+          status: res.status,
+        },
+      }
+    }
+    if (!res.body) {
+      return {
+        ok: false,
+        error: {
+          error: 'stream_unsupported',
+          detail: '当前浏览器不支持流式响应（response.body 为空）',
+          status: 0,
+        },
+      }
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let final: QueryResponse | null = null
+    let streamError: string | null = null
+
+    const dispatch = (frame: string) => {
+      const parsed = parseSseFrame(frame)
+      if (!parsed) return
+      const ev = { event: parsed.event, data: parsed.data } as StreamEvent
+      if (ev.event === 'result') final = ev.data
+      else if (ev.event === 'error') {
+        streamError = (ev.data as { message?: string } | undefined)?.message
+          ?? 'stream_error'
+      }
+      try {
+        opts.onEvent?.(ev)
+      } catch {
+        /* 观察者出错不影响结果解析 */
+      }
+    }
+
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx: number
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        dispatch(buf.slice(0, idx))
+        buf = buf.slice(idx + 2)
+      }
+    }
+    // 末尾可能没有空行分隔（服务端总是带 \n\n，但不要依赖它）
+    if (buf.trim()) dispatch(buf)
+    void reader.cancel().catch(() => undefined)
+
+    if (streamError) {
+      return {
+        ok: false,
+        error: { error: 'stream_error', detail: streamError, status: 200 },
+      }
+    }
+    if (!final) {
+      return {
+        ok: false,
+        error: {
+          error: 'stream_incomplete',
+          detail: '流式响应结束但未收到 result 帧（后端可能中途断开）',
+          status: 200,
+        },
+      }
+    }
+    return { ok: true, data: final }
+  } catch (e) {
+    const aborted = e instanceof DOMException && e.name === 'AbortError'
+    return {
+      ok: false,
+      error: {
+        error: aborted ? 'aborted' : 'network_error',
+        detail: aborted
+          ? '查询已取消'
+          : e instanceof Error ? e.message : String(e),
+        status: 0,
+      },
+    }
+  }
 }

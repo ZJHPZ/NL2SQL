@@ -546,6 +546,13 @@ python tests/test_m7_jdbc.py            # JDBC 桥需要 JDK 17；首次要联�
 python tests/test_m7_projects_api.py    # 项目/数据源/任务 HTTP 契约
 # 起界面后：顶部「项目」新建项目并连库 →「任务」新建/生成 SQL → 点「运行」
 
+# 5k) 前端体验（P0，无需 Key）
+#     查询走 SSE：连上即返回进度（实测首反馈 ~70ms，之前要等 2.4–3.9s），
+#     时间线显示「连接→选工具→执行→整理」；可随时取消；结论按 Markdown 渲染；
+#     首轮有骨架屏；键盘可达（skip link / 焦点环 / aria-live）——axe 四态 0 违规。
+#     验证：起界面后点「查询」观察进度逐步出现，中途点「取消」应立即恢复；
+#     $env:NL2SQL_LLM_API_KEY='sk-xxx' 后问题才有真实模型结论（离线时用规则规划器）。
+
 # 5c) 智能体真实模型验收（需 Key）
 #     $env:NL2SQL_LLM_API_KEY='sk-xxx'
 python tests/test_t7_agent_live.py
@@ -555,6 +562,7 @@ python tests/test_t8_agent_http.py       # agent 模式的 HTTP 契约
 #    cd apps/web/frontend && npm install && npm run build
 #    cd ../../.. && uvicorn apps.web.backend.main:app --port 8000
 #    打开 http://127.0.0.1:8000
+#    查询走 SSE（/api/query/stream）：进度实时可见、可取消、结论 Markdown 渲染
 
 # 5) 黄金集：造数 → 建基线 → 自检（应输出 30/30）
 cd golden_set
