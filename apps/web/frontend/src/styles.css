@@ -136,24 +136,24 @@ body {
 
 /* ---------------------------------------------------------------- 状态条 */
 .statusbar {
-  border: 1px solid var(--border); border-left-width: 3px;
+  border: 1px solid var(--border);
   border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;
   background: var(--bg-soft);
 }
-.statusbar.tone-ok { border-left-color: var(--ok); }
-.statusbar.tone-warn { border-left-color: var(--warn); }
-.statusbar.tone-bad { border-left-color: var(--bad); }
+.statusbar.tone-ok { border-color: var(--ok); }
+.statusbar.tone-warn { border-color: var(--warn); }
+.statusbar.tone-bad { border-color: var(--bad); }
 .statusbar-main { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .meta-cached { color: var(--accent); }
 
 .alert {
   margin-top: 8px; padding: 8px 10px; border-radius: 5px;
   font-size: 13px; background: var(--bg-raise);
-  border-left: 2px solid var(--border);
+  border: 1px solid var(--border);
 }
-.alert-warn { border-left-color: var(--warn); }
-.alert-bad { border-left-color: var(--bad); }
-.alert-info { border-left-color: var(--accent); }
+.alert-warn { border-color: var(--warn); }
+.alert-bad { border-color: var(--bad); }
+.alert-info { border-color: var(--accent); }
 .alert strong { display: block; margin-bottom: 3px; }
 
 .chips { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: 5px; }
@@ -225,8 +225,7 @@ table.grid tbody tr:hover td { background: rgba(76,141,255,.06); }
 /* 智能体的散文回答与结果表是互补的：结论给判断，表格给明细。
    放在 SQL 之上，因为用户先想知道"结论是什么"，再看"数是怎么来的"。 */
 .answer {
-  border: 1px solid var(--border); border-left-width: 3px;
-  border-left-color: var(--accent);
+  border: 1px solid var(--border);
   border-radius: 6px; margin-bottom: 12px; overflow: hidden;
 }
 .answer-head {
@@ -288,7 +287,7 @@ table.grid tbody tr:hover td { background: rgba(76,141,255,.06); }
 .switch input { cursor: pointer; }
 
 .safety-box {
-  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border: 1px solid var(--border);
   border-radius: 5px; padding: 9px 11px; margin-bottom: 10px; background: var(--bg);
 }
 .safety-title { font-size: 12px; font-weight: 600; margin-bottom: 5px; }
@@ -593,7 +592,7 @@ table.grid tbody tr:hover td { background: rgba(76,141,255,.06); }
   background: var(--bg);
   border: 1px solid var(--border); border-radius: 5px;
 }
-.rev-item.rev-ai { border-left: 3px solid #d2a8ff; }
+.rev-item.rev-ai { border-left: 1px solid #d2a8ff; }
 .rev-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rev-note { margin-top: 5px; color: var(--text-dim); font-size: 12px; }
 .rev-sql {
@@ -731,7 +730,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offs
 .md th, .md td { border: 1px solid var(--border); padding: 5px 9px; }
 .md blockquote {
   margin: 8px 0; padding: 2px 12px;
-  border-left: 3px solid var(--border); color: var(--text-dim);
+  border-left: 1px solid var(--border); color: var(--text-dim);
 }
 .md h1, .md h2, .md h3, .md h4 { margin: 10px 0 6px; line-height: 1.4; }
 .md h1 { font-size: 17px; }

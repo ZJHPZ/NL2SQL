@@ -51,6 +51,11 @@ npm-debug.log*
 # 题库原件与只读副本不入库
 ~$*.xlsx
 
+# ---- 本地设计技能（第三方，仅本机使用）----
+# impeccable skill 从上游仓库复制安装，工具链产物不并入本项目代码
+.dsh/skills/
+impeccable-main/
+
 # ---- 参考材料 ----
 # 第三方范本只用于阅读对照，不是本项目代码（MIT，原仓库 obra/superpowers）
 superpowers-main/
