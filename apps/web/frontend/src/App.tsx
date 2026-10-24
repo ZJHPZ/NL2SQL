@@ -392,9 +392,9 @@ export default function App() {
     [],
   )
 
-  /** 进入项目：把项目设为当前项目，并打开项目内功能（默认概览）。 */
+  /** 进入项目：把项目设为当前项目，并打开项目内功能（默认任务工作台）。 */
   const enterProject = useCallback(
-    (id: string, target: 'project' | 'tasks' = 'project') => {
+    (id: string, target: 'project' | 'tasks' = 'tasks') => {
       if (!id) return
       setEnteredProjectId(id)
       if (id !== projectIdRef.current) switchProject(id)
@@ -1140,26 +1140,17 @@ export default function App() {
 
       {view === 'tasks' && enteredProjectId && (
         <main id="main-content" className="main">
-          <div className="page">
-            <span className="gutter-tag mono" aria-hidden="true">
-              04
-            </span>
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">
-                  {enteredProject?.name ? `${enteredProject.name} · 任务` : '任务'}
-                </h1>
-                <p className="page-sub">
-                  右键文件夹新建任务或子文件夹；任务类型区分 SQL 与 PySpark
-                </p>
-              </div>
-              {info && <div className="env-chips"><EnvChips info={info} /></div>}
-            </div>
+          <div className="page page-ide">
+            <h1 className="visually-hidden">
+              {enteredProject?.name ?? enteredProjectId} · 任务
+            </h1>
             <TasksPanel
               key={`tasks-${enteredProjectId}`}
               projectId={enteredProjectId}
               projectName={enteredProject?.name ?? ''}
+              projectDescription={enteredProject?.description ?? ''}
               isDefaultProject={enteredProjectId === defaultProjectId}
+              onOpenOverview={() => setView('project')}
             />
           </div>
         </main>
