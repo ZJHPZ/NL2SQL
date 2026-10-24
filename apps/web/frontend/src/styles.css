@@ -6247,3 +6247,11 @@ table.grid td.mono {
     font-size: 25px;
   }
 }
+
+/* v11.1：未保存切换确认的小模态 */
+.modal-text {
+  margin: 2px 0 4px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}

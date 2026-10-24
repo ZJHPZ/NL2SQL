@@ -344,6 +344,12 @@ function TreeFolder({
 }
 
 // ---------------------------------------------------------------- 主组件
+/** 切换 tab / 关 tab / 回概览的去向：有未保存 SQL 时先确认再走。 */
+type NavIntent =
+  | { kind: 'overview' }
+  | { kind: 'task'; id: string }
+  | { kind: 'close'; id: string }
+
 export function TasksPanel({
   projectId,
   projectName,
@@ -374,6 +380,8 @@ export function TasksPanel({
   /** 底部面板：null = 收起。 */
   const [bottom, setBottom] = useState<'run' | 'history' | 'info' | null>('run')
   const gutterRef = useRef<HTMLDivElement | null>(null)
+  /** 有未保存 SQL 时点了别的 tab：先弹确认，别默默丢改动。 */
+  const [pendingNav, setPendingNav] = useState<NavIntent | null>(null)
 
   // ------------------------------------------------------------ 树状态
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -529,6 +537,44 @@ export function TasksPanel({
     })
   }
 
+  /** 真正执行切换（已确认或无未保存改动）。 */
+  const applyNav = (intent: NavIntent) => {
+    setPendingNav(null)
+    setSqlDirty(false)
+    if (intent.kind === 'overview') {
+      setSelectedId(null)
+      setDetail(null)
+      setDetailError(null)
+      setRunResult(null)
+      setDetailLoading(false)
+    } else if (intent.kind === 'task') {
+      if (intent.id !== selectedId) void openTask(intent.id)
+    } else {
+      closeTab(intent.id)
+    }
+  }
+
+  /** 切换前拦一道：有未保存 SQL 先问，避免切 tab 丢改动。 */
+  const askNav = (intent: NavIntent) => {
+    if (intent.kind === 'task' && intent.id === selectedId) return
+    if (!sqlDirty) {
+      applyNav(intent)
+      return
+    }
+    setPendingNav(intent)
+  }
+
+  // 刷新 / 关窗口时也提醒（组件内切换由 askNav 处理）。
+  useEffect(() => {
+    if (!sqlDirty) return
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [sqlDirty])
+
   const reloadDetail = useCallback(async () => {
     if (!selectedId) return
     const r = await api.getTask(projectId, selectedId)
@@ -581,12 +627,12 @@ export function TasksPanel({
   }
 
   // ------------------------------------------------------------ 任务动作
-  const saveTask = async () => {
-    if (!detail) return
+  const saveTask = async (): Promise<boolean> => {
+    if (!detail) return false
     const tid = detail.task.task_id
     if (!name.trim()) {
       setSaveError('任务名称不能为空')
-      return
+      return false
     }
     setSaveBusy(true)
     setSaveError(null)
@@ -606,7 +652,7 @@ export function TasksPanel({
     setSaveBusy(false)
     if (!r.ok) {
       setSaveError(errText(r))
-      return
+      return false
     }
     setSaveMsg(`已保存为 v${r.data.revision}`)
     setSqlDirty(false)
@@ -616,6 +662,7 @@ export function TasksPanel({
     )
     await reloadDetail()
     await loadList()
+    return true
   }
 
   const runTask = async () => {
@@ -834,11 +881,7 @@ export function TasksPanel({
           type="button"
           aria-current={!selectedId ? 'page' : undefined}
           className={!selectedId ? 'ide-tab active' : 'ide-tab'}
-          onClick={() => {
-            setSelectedId(null)
-            setDetail(null)
-            setDetailError(null)
-          }}
+          onClick={() => askNav({ kind: 'overview' })}
         >
           <span className="ide-tab-name">概览</span>
         </button>
@@ -849,7 +892,7 @@ export function TasksPanel({
               aria-current={selectedId === t.id ? 'page' : undefined}
               className="ide-tab-label"
               title={t.name}
-              onClick={() => void openTask(t.id)}
+              onClick={() => askNav({ kind: 'task', id: t.id })}
             >
               {t.name}
             </button>
@@ -857,7 +900,7 @@ export function TasksPanel({
               type="button"
               className="ide-tab-close"
               aria-label={`关闭 ${t.name}`}
-              onClick={() => closeTab(t.id)}
+              onClick={() => askNav({ kind: 'close', id: t.id })}
             >
               ×
             </button>
@@ -911,7 +954,7 @@ export function TasksPanel({
                   selectedTaskId={selectedId}
                   onToggle={toggleFolder}
                   onSelectFolder={setActiveFolder}
-                  onSelectTask={(tid) => void openTask(tid)}
+                  onSelectTask={(tid) => askNav({ kind: 'task', id: tid })}
                   onMenu={openMenu}
                 />
               ))}
@@ -931,7 +974,7 @@ export function TasksPanel({
                       <li key={t.task_id}>
                         <button
                           className={selectedId === t.task_id ? 'tree-task active' : 'tree-task'}
-                          onClick={() => void openTask(t.task_id)}
+                          onClick={() => askNav({ kind: 'task', id: t.task_id })}
                         >
                           <span
                             className={t.kind === 'pyspark' ? 'kind-dot kind-pyspark' : 'kind-dot'}
@@ -1010,7 +1053,7 @@ export function TasksPanel({
                           <button
                             className="linkbtn"
                             title={t.name}
-                            onClick={() => void openTask(t.task_id)}
+                            onClick={() => askNav({ kind: 'task', id: t.task_id })}
                           >
                             {t.name}
                           </button>
@@ -1116,6 +1159,25 @@ export function TasksPanel({
                     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
                       e.preventDefault()
                       void saveTask()
+                      return
+                    }
+                    if (e.key === 'Tab') {
+                      e.preventDefault()
+                      const el = e.currentTarget
+                      if (e.shiftKey) {
+                        // 反缩进：删掉光标前最多两个空格
+                        const start = el.selectionStart
+                        const spaces = sql.slice(0, start).match(/ {1,2}$/)
+                        if (spaces) {
+                          el.setRangeText('', start - spaces[0].length, start, 'end')
+                          setSql(el.value)
+                          setSqlDirty(true)
+                        }
+                        return
+                      }
+                      el.setRangeText('  ', el.selectionStart, el.selectionEnd, 'end')
+                      setSql(el.value)
+                      setSqlDirty(true)
                     }
                   }}
                 />
@@ -1133,7 +1195,7 @@ export function TasksPanel({
                 ) : (
                   <span className="meta mono">{lineCount} 行 · 已保存</span>
                 )}
-                <span className="meta mono">Ctrl+Enter 保存</span>
+                <span className="meta mono">Ctrl+Enter 保存 · Tab 缩进</span>
               </div>
 
               <div className="bottom-panel">
@@ -1493,6 +1555,41 @@ export function TasksPanel({
               {deleteBusy ? '删除中…' : '确认删除文件夹'}
             </button>
             <button className="btn btn-ghost" onClick={() => setDeleteFolder(null)}>
+              取消
+            </button>
+          </div>
+        </Dialog>
+      )}
+
+      {pendingNav && (
+        <Dialog title="有未保存的 SQL 改动" onClose={() => setPendingNav(null)}>
+          <p className="modal-text">
+            任务「{detail?.task.name ?? '当前任务'}」的 SQL 改动还没保存。切换到别处会丢失这次修改。
+          </p>
+          <div className="modal-actions">
+            <button
+              className="btn btn-primary"
+              disabled={saveBusy}
+              onClick={() => {
+                if (!pendingNav) return
+                const nav = pendingNav
+                void (async () => {
+                  const ok = await saveTask()
+                  if (ok) applyNav(nav)
+                })()
+              }}
+            >
+              {saveBusy ? '保存中…' : '保存并切换'}
+            </button>
+            <button
+              className="btn"
+              onClick={() => {
+                if (pendingNav) applyNav(pendingNav)
+              }}
+            >
+              放弃修改并切换
+            </button>
+            <button className="btn btn-ghost" onClick={() => setPendingNav(null)}>
               取消
             </button>
           </div>
