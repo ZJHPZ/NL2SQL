@@ -6255,3 +6255,37 @@ table.grid td.mono {
   line-height: 1.7;
   color: var(--ink-2);
 }
+
+/* v12：任务编辑器换成 CodeMirror 6（高亮/括号闭合/表列补全），材质沿用暖纸墨线 */
+.editor-cols {
+  display: flex;
+  grid-template-columns: none;
+  padding: 0;
+}
+.editor-cols .cm-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.editor-cols .cm-host .cm-editor {
+  flex: 1;
+  min-height: 0;
+}
+.editor-cols .cm-host .cm-editor.cm-focused {
+  outline: none;
+}
+.editor-loading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+@media (max-width: 640px) {
+  .editor-cols .cm-gutters {
+    min-width: 44px;
+  }
+}

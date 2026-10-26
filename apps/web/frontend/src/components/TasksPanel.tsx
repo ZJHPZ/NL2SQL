@@ -14,10 +14,11 @@
  *      不假装它能跑。
  *   5. 每次保存 / agent 修改都会留下版本记录，author="ai" 必须有角标。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type {
   ResultPayload,
+  TableInfo,
   TaskDetailResponse,
   TaskFolder,
   TaskRunResponse,
@@ -25,6 +26,9 @@ import type {
   TaskSummary,
 } from '../types'
 import { ResultTable } from './ResultTable'
+
+/** CodeMirror 只在打开任务时才需要，单独拆 chunk 不拖慢首屏。 */
+const SqlEditor = lazy(() => import('./SqlEditor'))
 
 const errText = (r: { error: { error: string; detail: string } }) =>
   `${r.error.error}: ${r.error.detail}`
@@ -379,7 +383,8 @@ export function TasksPanel({
   const [sideQuery, setSideQuery] = useState('')
   /** 底部面板：null = 收起。 */
   const [bottom, setBottom] = useState<'run' | 'history' | 'info' | null>('run')
-  const gutterRef = useRef<HTMLDivElement | null>(null)
+  /** 编辑器补全用的数据源表结构（引擎默认库，与任务执行同一源）。 */
+  const [editorTables, setEditorTables] = useState<TableInfo[]>([])
   /** 有未保存 SQL 时点了别的 tab：先弹确认，别默默丢改动。 */
   const [pendingNav, setPendingNav] = useState<NavIntent | null>(null)
 
@@ -486,6 +491,19 @@ export function TasksPanel({
     setBottom(null)
     void refreshAll()
   }, [isDefaultProject, projectId, refreshAll])
+
+  // 补全数据：/api/tables 不带 source_id 就是引擎默认数据源，
+  // 与「运行任务」时后端选择的源一致；失败就静默降级成只补关键字。
+  useEffect(() => {
+    let alive = true
+    void api.tables().then((r) => {
+      if (!alive || !r.ok) return
+      setEditorTables(r.data)
+    })
+    return () => {
+      alive = false
+    }
+  }, [projectId])
 
   const openTask = useCallback(
     async (taskId: string) => {
@@ -869,11 +887,6 @@ export function TasksPanel({
     pyspark: (tasks ?? []).filter((t) => t.kind === 'pyspark').length,
   }
 
-  const syncGutter = (el: HTMLTextAreaElement) => {
-    const g = gutterRef.current
-    if (g) g.scrollTop = el.scrollTop
-  }
-
   return (
     <div className="ide-workspace">
       <div className="ide-tabs">
@@ -1140,47 +1153,24 @@ export function TasksPanel({
               )}
 
               <div className="editor-cols">
-                <div className="editor-gutter mono" ref={gutterRef} aria-hidden="true">
-                  {Array.from({ length: lineCount }, (_, i) => (
-                    <span key={i}>{i + 1}</span>
-                  ))}
-                </div>
-                <textarea
-                  className="editor-code mono"
-                  value={sql}
-                  spellCheck={false}
-                  aria-label={detail.task.kind === 'pyspark' ? 'PySpark 代码' : 'SQL（只读）'}
-                  onChange={(e) => {
-                    setSql(e.target.value)
-                    setSqlDirty(true)
-                  }}
-                  onScroll={(e) => syncGutter(e.currentTarget)}
-                  onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                      e.preventDefault()
-                      void saveTask()
-                      return
-                    }
-                    if (e.key === 'Tab') {
-                      e.preventDefault()
-                      const el = e.currentTarget
-                      if (e.shiftKey) {
-                        // 反缩进：删掉光标前最多两个空格
-                        const start = el.selectionStart
-                        const spaces = sql.slice(0, start).match(/ {1,2}$/)
-                        if (spaces) {
-                          el.setRangeText('', start - spaces[0].length, start, 'end')
-                          setSql(el.value)
-                          setSqlDirty(true)
-                        }
-                        return
-                      }
-                      el.setRangeText('  ', el.selectionStart, el.selectionEnd, 'end')
-                      setSql(el.value)
+                <Suspense
+                  fallback={
+                    <div className="editor-loading mono">正在加载编辑器…</div>
+                  }
+                >
+                  <SqlEditor
+                    value={sql}
+                    onChange={(next) => {
+                      setSql(next)
                       setSqlDirty(true)
+                    }}
+                    tables={detail.task.kind === 'pyspark' ? [] : editorTables}
+                    ariaLabel={
+                      detail.task.kind === 'pyspark' ? 'PySpark 代码' : 'SQL 代码'
                     }
-                  }}
-                />
+                    onSave={() => void saveTask()}
+                  />
+                </Suspense>
               </div>
 
               <div className="editor-foot">
@@ -1195,7 +1185,7 @@ export function TasksPanel({
                 ) : (
                   <span className="meta mono">{lineCount} 行 · 已保存</span>
                 )}
-                <span className="meta mono">Ctrl+Enter 保存 · Tab 缩进</span>
+                <span className="meta mono">Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全</span>
               </div>
 
               <div className="bottom-panel">

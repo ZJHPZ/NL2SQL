@@ -142,3 +142,23 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
   后端与 API 未改，PySpark 仍只保存不执行。
 - **验证**：axe 七态 + 独立探针（概览/编辑器/移动端）0 违规；编辑器 54px gutter + 886px 正文、22px 行高；
   ≤900 单列（侧栏 38vh）、≤640 紧凑、无横向溢出；像素统计纸色 82%、墨色 16%、暖 R−B≈18、朱红 0.19%。
+
+## SQL 编辑器补全（v12，2026-10-26）
+
+任务编辑器从 textarea 换成 CodeMirror 6（`apps/web/frontend/src/components/SqlEditor.tsx`），
+材质仍走暖纸墨线：纸底墨字、mono 12.5/22 行高、54px 纸 2 色行号槽 + 右发丝线；
+关键字加粗墨色、字符串橄榄、数字赭石、注释墨 3 斜体，补全浮层为纸面 + 墨边，
+选中项墨底纸字。
+
+- **补全**：`Ctrl+Space`（或输入触发）弹出——SQL 关键字/函数、数据源表名
+  （detail 显示列数、info 显示表注释）、FROM/JOIN 引用表的列（detail 显示类型、
+  info 显示类型/可空/主键/注释）、`别名.` 只列该表列；主键列排序加权。
+- **数据来源**：`GET /api/tables`（引擎默认数据源，与任务运行同一源），进入任务
+  面板加载一次；不新增后端接口、不调 LLM，补全确定性、零额外费用。
+- **行为不变**：Ctrl+Enter 保存、Tab/Shift+Tab 缩进、未保存切换确认、beforeunload
+  提醒全部保留；编辑器按需懒加载（`SqlEditor` 独立 chunk，不拖慢首屏）。
+- **边界**：高亮不重排文本、不改写用户大小写；PySpark 任务只用高亮/括号闭合，
+  不投喂 SQL 补全数据；未知表/列暂不画错误波浪线（二期：基于 DDL 的 lint）。
+- **验证**：tsc 0、build 通过（主包 gzip 109.88kB，编辑器 chunk gzip 126.33kB 懒加载）；
+  E2E axe 七态 0、运行时 0、失败请求 0；IDE 探针（CM 几何、gutter 54px、无重叠）、
+  dirty_probe 13 项、移动端单列全部通过。
