@@ -280,6 +280,13 @@ export interface SourceSnapshotResult {
   warnings: string[]
 }
 
+/** 项目级「受控写」设置：默认关闭，写目标只能是本项目绑定的 SQLite 测试库 */
+export interface DataWriteSettings {
+  enabled: boolean
+  source_id: string
+  max_affected: number
+}
+
 /** 项目摘要与详情同构：详情只是 sources 更完整。 */
 export interface ProjectSummary {
   id: string
@@ -290,6 +297,8 @@ export interface ProjectSummary {
   /** semantic=dbt 时是 dbt metrics.yml 路径 */
   metrics_path: string
   sources: SourceOut[]
+  /** 受控写设置（详情接口才有；列表可能是默认值） */
+  data_write?: DataWriteSettings
   created_at: string
   updated_at: string
   /** default 项目不可删除/改名（后端 400 兜底，界面也置灰） */
@@ -314,6 +323,7 @@ export interface ProjectUpdateIn {
   description?: string
   semantic?: string
   metrics_path?: string
+  data_write?: DataWriteSettings
 }
 
 /** JDBC 驱动状态。kind ∈ sqlite / mysql / postgresql / mssql */
@@ -343,7 +353,7 @@ export interface TaskSummary {
   description: string
   /** 所属文件夹路径（如 ods/原始层），空串 = 根目录 */
   folder: string
-  /** "sql" | "pyspark"；PySpark 任务只能保存/版本，暂不支持运行 */
+  /** "sql" | "pyspark" | "write"；PySpark 任务只能保存/版本，暂不支持运行 */
   kind: string
   status: string
   /** 前若干字符，列表里做一行预览 */
@@ -456,6 +466,68 @@ export interface TaskRunResponse {
   sql: string
   result: TaskRunResultPayload | null
   message: string
+}
+
+// ---------------------------------------------------------------- 受控写（P1）
+/** dry-run / commit 共用的前后样本行（键值来自数据表列名） */
+export type WriteSampleRow = Record<string, unknown>
+
+/** POST .../write/dry-run 的返回。
+ * status: preview（拿到一次性凭据）/ blocked（守门拒绝）/ failed（执行失败）。
+ * 后两者 HTTP 仍是 200，reason/rule 说明原因。
+ */
+export interface WriteDryRunResponse {
+  status: 'preview' | 'blocked' | 'failed'
+  reason?: string
+  rule?: string
+  sql?: string
+  kind?: string
+  table?: string
+  rows?: number
+  before?: WriteSampleRow[]
+  after?: WriteSampleRow[]
+  dry_run_id?: string
+  expires_at?: string
+  audit_id?: number
+  task?: TaskSummary
+  max_affected?: number
+}
+
+/** POST .../write/commit 的返回 */
+export interface WriteCommitResponse {
+  status: 'committed' | 'blocked' | 'failed'
+  reason?: string
+  rule?: string
+  rows?: number
+  kind?: string
+  table?: string
+  before?: WriteSampleRow[]
+  audit_id?: number
+  task?: TaskSummary
+}
+
+/** 写入审计记录（GET /api/projects/{pid}/write-audit） */
+export interface WriteAuditEntry {
+  audit_id: number
+  project_id: string
+  task_id: string
+  task_name: string
+  revision: number
+  source_id: string
+  /** insert / update / delete */
+  kind: string
+  table_name: string
+  sql: string
+  /** preview | committed | rejected | failed */
+  status: string
+  rows: number
+  error: string
+  created_at: string
+}
+
+export interface WriteAuditResponse {
+  project_id: string
+  audit: WriteAuditEntry[]
 }
 
 // ---------------------------------------------------------------- 插件与工具管理

@@ -121,6 +121,7 @@ class ProjectStore:
         meta.setdefault("updated_at", "")
         sources = meta.get("sources")
         meta["sources"] = [dict(item) for item in sources] if isinstance(sources, list) else []
+        meta["data_write"] = normalize_data_write(meta.get("data_write"))
         return meta
 
     def list_projects(self) -> list[dict[str, Any]]:
@@ -166,7 +167,7 @@ class ProjectStore:
         if meta is None:
             raise ConfigError(f"项目不存在：{project_id}")
         allowed = {"name", "description", "semantic", "metrics_path",
-                   "planner", "runtime"}
+                   "planner", "runtime", "data_write"}
         for key, value in fields.items():
             if key not in allowed or value is None:
                 continue
@@ -174,6 +175,8 @@ class ProjectStore:
                 value = _clean(value, limit=16) or "none"
                 if value not in ("none", "dbt", "auto", "golden"):
                     raise ConfigError("semantic 只能是 none / dbt / auto")
+            elif key == "data_write":
+                value = normalize_data_write(value)
             elif key == "planner":
                 value = _clean(value, limit=16) or "agent"
                 if value not in ("agent", "auto", "hybrid", "hybrid_verified", "llm", "rule"):
@@ -294,6 +297,19 @@ class ProjectStore:
                     continue
                 lines.append(f"{key} = {_toml_value(value)}")
             lines.append("")
+        data_write = normalize_data_write(meta.get("data_write"))
+        if (data_write["enabled"] or data_write["source_id"]
+                or data_write["max_affected"] != DATA_WRITE_MAX_DEFAULT):
+            lines.append("[data_write]")
+            lines.append(
+                f"enabled = {'true' if data_write['enabled'] else 'false'}"
+            )
+            if data_write["source_id"]:
+                lines.append(
+                    f'source_id = {_toml_quote(data_write["source_id"])}'
+                )
+            lines.append(f"max_affected = {int(data_write['max_affected'])}")
+            lines.append("")
         path = self._toml_path(project_id)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -308,6 +324,32 @@ def _load_toml(handle: Any) -> dict[str, Any]:
     except ImportError as exc:  # pragma: no cover - Python 3.11+ 才有
         raise ConfigError("读取 project.toml 需要 Python 3.11+（tomllib）") from exc
     return tomllib.load(handle)
+
+
+DATA_WRITE_MAX_DEFAULT = 100
+DATA_WRITE_MAX_CAP = 1000
+
+
+def normalize_data_write(raw: Any) -> dict[str, Any]:
+    """收敛项目写入设置：默认关闭、绑定哪一个数据源、单次影响行数上限。
+
+    默认必须是关的——受控写的前提是用户明确打开，而不是升级后自动拥有。
+    """
+    data = raw if isinstance(raw, dict) else {}
+    enabled = bool(data.get("enabled", False))
+    source_id = _clean(data.get("source_id"), limit=64).lower()
+    if source_id and not re.match(r"^[a-z][a-z0-9_-]{0,31}$", source_id):
+        raise ConfigError("写入数据源 id 不合法：小写字母开头，后接小写字母/数字/_/-")
+    try:
+        max_affected = int(data.get("max_affected") or DATA_WRITE_MAX_DEFAULT)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("data_write.max_affected 必须是整数") from exc
+    max_affected = max(1, min(DATA_WRITE_MAX_CAP, max_affected))
+    return {
+        "enabled": enabled,
+        "source_id": source_id,
+        "max_affected": max_affected,
+    }
 
 
 def _normalize_source(raw: dict[str, Any]) -> dict[str, Any]:
@@ -673,6 +715,7 @@ def project_public(meta: dict[str, Any], *, engine_entry: EngineEntry | None = N
         "created_at": meta.get("created_at") or "",
         "updated_at": meta.get("updated_at") or "",
         "sources": [public_source(s) for s in meta.get("sources") or []],
+        "data_write": normalize_data_write(meta.get("data_write")),
         "tasks_enabled": bool(tasks_enabled),
         "is_default": bool(meta.get("id") == DEFAULT_PROJECT_ID),
     }

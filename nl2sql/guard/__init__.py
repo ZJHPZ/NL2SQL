@@ -16,8 +16,9 @@ from __future__ import annotations
 from ..contracts.source import SourceCapabilities
 from ..dialect.tokens import is_read_only, split_statements
 from .limit import apply_limit, has_limit
+from .write import WriteCheck, WriteGuard
 
-__all__ = ["Guard", "GuardDecision"]
+__all__ = ["Guard", "GuardDecision", "WriteCheck", "WriteGuard"]
 
 
 class GuardDecision:

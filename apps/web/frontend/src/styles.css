@@ -6289,3 +6289,112 @@ table.grid td.mono {
     min-width: 44px;
   }
 }
+
+
+/* ---------------------------------------------------------------- v13：受控写（P1）
+ * 写入任务是「危险」但受控的：朱红只用在写入标记、预演/提交按钮与审计状态上。
+ */
+.badge-write {
+  background: rgba(168, 58, 42, 0.09);
+  border-color: rgba(168, 58, 42, 0.28);
+  color: var(--vermilion);
+}
+
+.kind-dot.kind-write {
+  background: var(--vermilion);
+}
+
+.ide-stats {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+/* 预演前后样本：两栏对照，等宽数字，滚动不撑破底部面板 */
+.write-diff {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  margin-top: 6px;
+}
+
+.write-diff-col {
+  min-width: 0;
+}
+
+.write-diff-title {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+}
+
+.write-diff-empty {
+  margin: 6px 0;
+}
+
+.write-diff-scroll {
+  overflow: auto;
+  max-height: 190px;
+  border: 1px solid var(--rule-soft);
+  background: var(--paper);
+}
+
+.write-diff-table,
+.write-audit-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.write-diff-table th,
+.write-audit-table th {
+  position: sticky;
+  top: 0;
+  background: var(--paper-2);
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink-2);
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--rule-mid);
+  white-space: nowrap;
+}
+
+.write-diff-table td,
+.write-audit-table td {
+  padding: 4px 9px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.write-diff-table tr:last-child td,
+.write-audit-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.write-audit-sql {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bottom-audit .linkbtn {
+  margin-left: 8px;
+}
+
+@media (max-width: 900px) {
+  .write-diff {
+    grid-template-columns: 1fr;
+  }
+
+  .ide-stat:nth-child(odd) {
+    border-left: 0;
+    padding-left: 2px;
+  }
+}
+
+@media (max-width: 640px) {
+  .write-audit-table {
+    font-size: 11px;
+  }
+}

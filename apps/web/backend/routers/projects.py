@@ -31,6 +31,7 @@ from ..projects import (
     _normalize_source,
     _source_config_from_meta,
     default_project_meta,
+    normalize_data_write,
     public_source,
 )
 from ..schemas import (
@@ -125,6 +126,7 @@ def _detail(hub: ProjectHub, meta: dict[str, Any]) -> dict[str, Any]:
         "semantic": meta.get("semantic") or "none",
         "metrics_path": meta.get("metrics_path") or "",
         "sources": [_source_out(hub, project_id, s) for s in meta.get("sources") or []],
+        "data_write": normalize_data_write(meta.get("data_write")),
         "created_at": meta.get("created_at") or "",
         "updated_at": meta.get("updated_at") or "",
         "is_default": project_id == DEFAULT_PROJECT_ID,

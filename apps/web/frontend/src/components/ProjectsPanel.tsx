@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import type {
+  DataWriteSettings,
   DriverInfo,
   ProjectDetail,
   ProjectSummary,
@@ -148,6 +149,16 @@ export function ProjectsPanel({
   const [editMetrics, setEditMetrics] = useState('')
   const [projectBusy, setProjectBusy] = useState(false)
 
+  // ------------------------------------------------------------ 受控写设置
+  // 默认关闭；开启时写目标只能是项目里已绑定的 SQLite 数据源。
+  const [writeEditing, setWriteEditing] = useState(false)
+  const [writeEnabled, setWriteEnabled] = useState(false)
+  const [writeSourceId, setWriteSourceId] = useState('')
+  const [writeMaxAffected, setWriteMaxAffected] = useState(100)
+  const [writeBusy, setWriteBusy] = useState(false)
+  const [writeError, setWriteError] = useState<string | null>(null)
+  const [writeConfirmName, setWriteConfirmName] = useState('')
+
   // ------------------------------------------------------------ 数据源表单
   const [formOpen, setFormOpen] = useState(false)
   const [editingSid, setEditingSid] = useState<string | null>(null)
@@ -232,6 +243,12 @@ export function ProjectsPanel({
       setEditDesc(r.data.description ?? '')
       setEditSemantic(r.data.semantic || 'golden')
       setEditMetrics(r.data.metrics_path ?? '')
+      setWriteEditing(false)
+      setWriteEnabled(Boolean(r.data.data_write?.enabled))
+      setWriteSourceId(r.data.data_write?.source_id ?? '')
+      setWriteMaxAffected(r.data.data_write?.max_affected ?? 100)
+      setWriteConfirmName('')
+      setWriteError(null)
     })()
     return () => {
       cancelled = true
@@ -295,6 +312,43 @@ export function ProjectsPanel({
     setDetail(r.data)
     setProjectEditing(false)
     setProjectMsg('项目信息已保存')
+    await loadList()
+    onProjectsChanged()
+  }
+
+  /** 保存受控写设置：首次开启需要在界面上输入项目名，防止误触。 */
+  const saveWriteSettings = async () => {
+    if (!detail) return
+    const enabling = writeEnabled && !detail.data_write?.enabled
+    if (enabling && writeConfirmName.trim() !== detail.name) {
+      setWriteError('开启受控写需要输入当前项目名确认')
+      return
+    }
+    if (writeEnabled && !writeSourceId) {
+      setWriteError('开启受控写前请先绑定一个 SQLite 测试库')
+      return
+    }
+    setWriteBusy(true)
+    setWriteError(null)
+    const dataWrite: DataWriteSettings = {
+      enabled: writeEnabled,
+      source_id: writeSourceId,
+      max_affected: writeMaxAffected,
+    }
+    const r = await api.updateProject(detail.id, { data_write: dataWrite })
+    setWriteBusy(false)
+    if (!r.ok) {
+      setWriteError(errText(r))
+      return
+    }
+    setDetail(r.data)
+    setWriteEditing(false)
+    setWriteConfirmName('')
+    setProjectMsg(
+      writeEnabled
+        ? `受控写已开启：绑定的写目标为「${writeSourceId}」，单次最多影响 ${writeMaxAffected} 行`
+        : '受控写已关闭',
+    )
     await loadList()
     onProjectsChanged()
   }
@@ -914,6 +968,131 @@ export function ProjectsPanel({
                 </div>
               ))}
             </div>
+
+            {/* -------------------------------------------------- 受控写 */}
+            {!detail.is_default && (
+              <div className="section-box">
+                <div className="section-title">
+                  受控写 <span className="meta">预览能力</span>
+                  <span className="spacer" />
+                  {detail.data_write?.enabled ? (
+                    <span className="badge badge-write">已开启</span>
+                  ) : (
+                    <span className="badge">默认关闭</span>
+                  )}
+                  <button
+                    className="btn btn-ghost btn-tiny"
+                    onClick={() => {
+                      setWriteEditing((v) => !v)
+                      setWriteError(null)
+                      setWriteConfirmName('')
+                    }}
+                  >
+                    {writeEditing ? '收起设置' : '设置'}
+                  </button>
+                </div>
+                <div className="meta" style={{ marginBottom: 10 }}>
+                  只影响「写入」类任务：单表 INSERT / UPDATE / DELETE，必须先预演
+                  （事务内执行后回滚），确认后才提交；问答链路永远只读。
+                </div>
+                {writeEditing ? (
+                  <>
+                    <div className="field-grid">
+                      <label className="field">
+                        <span>状态</span>
+                        <select
+                          value={writeEnabled ? 'on' : 'off'}
+                          onChange={(e) => setWriteEnabled(e.target.value === 'on')}
+                        >
+                          <option value="off">关闭（默认）</option>
+                          <option value="on">开启受控写</option>
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>写目标（SQLite 测试库）</span>
+                        <select
+                          value={writeSourceId}
+                          disabled={!writeEnabled}
+                          onChange={(e) => setWriteSourceId(e.target.value)}
+                        >
+                          <option value="">（未选择）</option>
+                          {sources
+                            .filter((s) => s.adapter === 'sqlite')
+                            .map((s) => (
+                              <option key={s.source_id} value={s.source_id}>
+                                {s.label || s.source_id} · {s.source_id}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>单次影响行数上限</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={1000}
+                          value={writeMaxAffected}
+                          disabled={!writeEnabled}
+                          onChange={(e) =>
+                            setWriteMaxAffected(
+                              Math.max(1, Math.min(1000, Number(e.target.value) || 1)),
+                            )
+                          }
+                        />
+                      </label>
+                      {writeEnabled && !detail.data_write?.enabled && (
+                        <label className="field">
+                          <span>输入项目名确认</span>
+                          <input
+                            value={writeConfirmName}
+                            placeholder={detail.name}
+                            onChange={(e) => setWriteConfirmName(e.target.value)}
+                          />
+                        </label>
+                      )}
+                    </div>
+                    <div className="meta" style={{ marginTop: 6 }}>
+                      写目标必须是本项目绑定的 SQLite 数据源；开启后仍只能做单表写入，
+                      DDL / 多语句 / 无 WHERE 的语句会被守门直接拒绝。
+                    </div>
+                    {writeError && <div className="alert alert-bad">{writeError}</div>}
+                    <div className="form-actions">
+                      <button
+                        className="btn btn-primary btn-tiny"
+                        disabled={writeBusy}
+                        onClick={() => void saveWriteSettings()}
+                      >
+                        {writeBusy ? '保存中…' : '保存设置'}
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-tiny"
+                        onClick={() => {
+                          setWriteEditing(false)
+                          setWriteError(null)
+                          setWriteConfirmName('')
+                          setWriteEnabled(Boolean(detail.data_write?.enabled))
+                          setWriteSourceId(detail.data_write?.source_id ?? '')
+                          setWriteMaxAffected(detail.data_write?.max_affected ?? 100)
+                        }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </>
+                ) : detail.data_write?.enabled ? (
+                  <div className="chips">
+                    <span className="chip">
+                      写目标 <b className="mono">{detail.data_write.source_id || '未绑定'}</b>
+                    </span>
+                    <span className="chip">单次最多 {detail.data_write.max_affected} 行</span>
+                  </div>
+                ) : (
+                  <div className="meta">
+                    当前关闭：写入任务只能保存和预演，不能提交到数据库。
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* -------------------------------------------------- 数据源表单 */}
             {formOpen && (

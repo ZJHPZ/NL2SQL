@@ -181,3 +181,54 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
   格式化后 `SELECT/FROM` 大写 + 多行缩进 + 脏标记，axe 0、运行时 0；全量 E2E
   axe 七态 0、ide_probe/dirty_probe/completion_probe 全绿；构建主包 gzip 110.27kB、
   编辑器 chunk gzip 134.25kB、sql-formatter chunk gzip 76.33kB（均按需懒加载）。
+
+
+## 受控写（P1，2026-10-26）
+
+写入任务不是「SQL 控制台」：只允许单表 INSERT / UPDATE / DELETE，且必须先预演、确认后才落库。
+写权限默认关闭，写目标只能是项目自己绑定的 SQLite 测试库；问答链路、只读 SQL 任务、
+随行智能体全部保持原样。
+
+### 四层防线
+
+1. **守门** `nl2sql/guard/write.py`：单条、≤20000 字符；禁 DDL / TRUNCATE / 多语句 /
+   恒真 WHERE 等；INSERT 只认 `INSERT INTO 表 (列) VALUES …`，UPDATE / DELETE 必须带
+   WHERE；`sqlite_` 前缀与 blocked_tables 拒绝。保存任务与预演两端都过这道门（双层）。
+2. **两阶段执行** `apps/web/backend/write_runner.py`：`BEGIN IMMEDIATE` 事务里真执行，
+   统计影响行数并在回滚前取样 before / after；超过项目 `max_affected` 直接回滚并报
+   `affected_limit`；预演结束 ROLLBACK，提交才 COMMIT。
+3. **一次性凭据**：预演凭据存任务库 `write_dry_run`（`wd-*`，5 分钟过期）；提交时校验
+   项目 / 任务 / revision / SQL 未变（变过 409 并作废），提交成功即删除；任务库新增
+   `write_audit` 只追加审计。
+4. **读写分离**：写执行器用独立 `sqlite3.connect`，绕开只读适配器；项目设置
+   `[data_write] enabled / source_id / max_affected`（上限 1–1000，默认 100），开启需
+   在界面上输入项目名二次确认。
+
+### 界面（暖纸墨线）
+
+- 任务类型新增「写入（受控写）」：编辑条类型 badge 用朱红 `.badge-write`，树里的点与
+  标签为朱红 `wr`，概览统计从 4 格变 5 格（新增写入任务）。
+- 运行按钮变「预演写入」（SQL 未保存时禁用）→ 底部面板展示「预演通过 · 将影响 N 行 ·
+  上限 M」+ 执行前 / 执行后两栏样本（mono 表、sticky 表头）+ 朱红「确认提交」；被拒 /
+  超限用 `.alert-bad` 给出原因与规则代码。
+- 底部面板新增「写入审计」tab（仅写任务）：时间 / 状态 / 操作 / 表 / 行数 / 任务 /
+  SQL 或原因；状态 badge 预演 = 赭石、已提交 = 橄榄、拒绝 / 失败 = 朱红。
+- 项目详情新增「受控写」section：默认关闭；开启要输入项目名，写目标只列 SQLite 数据源，
+  影响行数上限 1–1000，保存后顶部显示「已开启」朱红 badge 与绑定值。
+
+### 边界
+
+- 不含 DDL / 事务脚本 / 存储过程；SQLite 以外的引擎暂不支持写入（接口 400 明确说明）。
+- PySpark 仍只保存不执行；写任务不能点「运行」，必须预演。
+- 审计表在项目任务库内，随项目一起删除；不含业务库审计。
+
+### 验证
+
+- `tests/test_write_guard.py` 62 checks；`tests/test_write_api.py` 全 PASS（默认关闭 403、
+  预演不落库、提交落库、一次性凭据、改 SQL 后 409、affected_limit、审计 preview /
+  committed / failed、写入目标不能是任务库）。
+- `_tmp/e2e/write_probe.mjs`（临时项目 + 临时 sqlite）：项目设置面板、写入任务树标、
+  预演前后样本、确认提交（DB 中 2 行变 paid）、写入审计表、无 WHERE 保存被拒、超上限
+  affected_limit；axe 五态 0 违规、运行时 0。全量 E2E（product / ide / dirty /
+  completion / lint）保持全绿；tsc 0、build 通过（主包 gzip 113.22kB、编辑器 chunk
+  gzip 134.25kB、sql-formatter chunk gzip 76.33kB）。

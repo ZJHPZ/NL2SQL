@@ -31,12 +31,13 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .dialect.tokens import is_read_only, split_statements
 from .errors import TaskError
+from .guard.write import WriteCheck, WriteGuard
 
 __all__ = [
     "AI_COMMENT_PREFIX",
@@ -51,6 +52,7 @@ __all__ = [
     "validate_task_content",
     "validate_task_kind",
     "validate_task_sql",
+    "validate_task_write",
 ]
 
 # AI 修改注释的固定前缀。用户要求格式为「ai修改，***时间」。
@@ -59,11 +61,13 @@ MAX_SQL_CHARS = 20000
 MAX_NAME_CHARS = 80
 MAX_NOTE_CHARS = 500
 
-# 任务类型。SQL 走只读查询链路；PySpark 只保存代码，执行器尚未接入，
-# 界面上必须如实标注「暂不可运行」，不能假装能跑。
+# 任务类型。SQL 走只读查询链路；PySpark 只保存代码，执行器尚未接入；
+# 写入任务走受控写链路（单表 + 带条件 + 影响行数上限 + 预演凭据），
+# 与只读问答链路完全分离。
 TASK_KIND_SQL = "sql"
 TASK_KIND_PYSPARK = "pyspark"
-TASK_KINDS = (TASK_KIND_SQL, TASK_KIND_PYSPARK)
+TASK_KIND_WRITE = "write"
+TASK_KINDS = (TASK_KIND_SQL, TASK_KIND_PYSPARK, TASK_KIND_WRITE)
 
 # 项目首次打开任务库时自动建的四层数仓目录（ODS → DWD → DWM → ADS）。
 DEFAULT_TASK_FOLDERS = ("ods", "dwd", "dwm", "ads")
@@ -119,6 +123,43 @@ CREATE TABLE IF NOT EXISTS task_folder (
 
 CREATE INDEX IF NOT EXISTS idx_task_updated ON task(updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_folder ON task_folder(path);
+
+-- 受控写的一次性预演凭据：dry-run 通过后 5 分钟内可凭此提交，
+-- 提交时会校验 revision / SQL / 影响行数与预演时一致。
+CREATE TABLE IF NOT EXISTS write_dry_run (
+    dry_run_id   TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL,
+    project_id   TEXT NOT NULL DEFAULT '',
+    revision     INTEGER NOT NULL DEFAULT 0,
+    source_id    TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT '',
+    table_name   TEXT NOT NULL DEFAULT '',
+    sql          TEXT NOT NULL,
+    rows         INTEGER NOT NULL DEFAULT 0,
+    before_json  TEXT NOT NULL DEFAULT '[]',
+    after_json   TEXT NOT NULL DEFAULT '[]',
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL
+);
+
+-- 写入审计：预演、提交、失败都留痕；只记录元信息，不存业务数据快照。
+CREATE TABLE IF NOT EXISTS write_audit (
+    audit_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   TEXT NOT NULL DEFAULT '',
+    task_id      TEXT NOT NULL DEFAULT '',
+    task_name    TEXT NOT NULL DEFAULT '',
+    revision     INTEGER NOT NULL DEFAULT 0,
+    source_id    TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT '',
+    table_name   TEXT NOT NULL DEFAULT '',
+    sql          TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT '',
+    rows         INTEGER NOT NULL DEFAULT 0,
+    error        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_write_audit ON write_audit(created_at);
 """
 
 
@@ -152,6 +193,27 @@ def validate_task_sql(sql: str) -> str:
     return text
 
 
+def validate_task_write(sql: str) -> str:
+    """校验并返回「写入任务」的 SQL 原文。
+
+    写入任务的规则比只读任务更细（见 `nl2sql.guard.write`）：
+    单条、单表、INSERT/UPDATE/DELETE、UPDATE/DELETE 必须带非恒真 WHERE。
+    这里只做保存时能判定的语句形状校验；影响行数上限要等执行层真的
+    在事务里跑一遍才能知道，所以不在保存时判断。
+    """
+    text = (sql or "").strip()
+    if not text:
+        raise TaskError("写入 SQL 不能为空")
+    if len(text) > MAX_SQL_CHARS:
+        raise TaskError(
+            f"SQL 太长（{len(text)} 字符，上限 {MAX_SQL_CHARS}）；任务只适合存放单条语句"
+        )
+    result = WriteGuard().check(text)
+    if not result.allowed:
+        raise TaskError(f"写入任务不合法：{result.reason}")
+    return text
+
+
 def validate_task_kind(kind: str | None) -> str:
     """校验任务类型。默认 SQL；PySpark 仅保存代码与版本，执行器未接入。"""
     text = (kind or TASK_KIND_SQL).strip().lower()
@@ -166,7 +228,8 @@ def validate_task_content(kind: str, content: str) -> str:
     """按任务类型校验代码正文。
 
     SQL 任务必须单条只读查询（会被真正执行）；
-    PySpark 任务只是保存代码与版本，执行器未接入，因此不做只读语法限制。
+    PySpark 任务只是保存代码与版本，执行器未接入，因此不做只读语法限制；
+    写入任务走受控写守门（单表 + 带条件），执行时还要再过影响行数上限。
     """
     if kind == TASK_KIND_PYSPARK:
         text = (content or "").strip()
@@ -177,6 +240,8 @@ def validate_task_content(kind: str, content: str) -> str:
                 f"PySpark 代码太长（{len(text)} 字符，上限 {MAX_SQL_CHARS}）"
             )
         return text
+    if kind == TASK_KIND_WRITE:
+        return validate_task_write(content)
     return validate_task_sql(content)
 
 
@@ -452,6 +517,134 @@ class TaskStore:
                 (task_id, int(revision)),
             ).fetchone()
         return _row_to_revision(row) if row else None
+
+    # ------------------------------------------------------------ 受控写
+    def save_dry_run(
+        self,
+        *,
+        task_id: str,
+        revision: int,
+        source_id: str,
+        check: WriteCheck,
+        rows: int,
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+        ttl_s: int = 300,
+    ) -> dict[str, Any]:
+        """记录一次预演结果，返回一次性凭据（提交时凭凭据 + 校验一致才生效）。"""
+        moment = self._clock()
+        now = moment.strftime(_TS_FORMAT)
+        expires_at = (moment + timedelta(seconds=max(30, int(ttl_s)))).strftime(
+            _TS_FORMAT
+        )
+        dry_run_id = f"wd-{uuid.uuid4().hex[:12]}"
+        with self._connect() as conn:
+            # 顺手清掉过期凭据，避免表越来越大。
+            conn.execute("DELETE FROM write_dry_run WHERE expires_at < ?", (now,))
+            conn.execute(
+                "INSERT INTO write_dry_run (dry_run_id, task_id, project_id, "
+                "revision, source_id, kind, table_name, sql, rows, before_json, "
+                "after_json, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    dry_run_id, task_id, self._project_id, int(revision),
+                    source_id, check.kind, check.table, check.sql, int(rows),
+                    json.dumps(before, ensure_ascii=False, default=str),
+                    json.dumps(after, ensure_ascii=False, default=str),
+                    now, expires_at,
+                ),
+            )
+        return {
+            "dry_run_id": dry_run_id,
+            "rows": int(rows),
+            "before": before,
+            "after": after,
+            "expires_at": expires_at,
+        }
+
+    def get_dry_run(self, dry_run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM write_dry_run WHERE dry_run_id = ?",
+                (dry_run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            # 时间戳统一是 "%Y-%m-%d %H:%M:%S"，可直接按字符串比较。
+            if str(row["expires_at"]) < self._now():
+                conn.execute(
+                    "DELETE FROM write_dry_run WHERE dry_run_id = ?",
+                    (dry_run_id,),
+                )
+                return None
+        return {
+            "dry_run_id": row["dry_run_id"],
+            "task_id": row["task_id"],
+            "project_id": row["project_id"],
+            "revision": int(row["revision"]),
+            "source_id": row["source_id"],
+            "kind": row["kind"],
+            "table": row["table_name"],
+            "sql": row["sql"],
+            "rows": int(row["rows"]),
+            "before": _load_json_list(row["before_json"]),
+            "after": _load_json_list(row["after_json"]),
+            "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+        }
+
+    def delete_dry_run(self, dry_run_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM write_dry_run WHERE dry_run_id = ?", (dry_run_id,)
+            )
+
+    def record_write_audit(
+        self,
+        *,
+        task: Task,
+        source_id: str,
+        check: WriteCheck,
+        status: str,
+        rows: int = 0,
+        error: str = "",
+    ) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO write_audit (project_id, task_id, task_name, "
+                "revision, source_id, kind, table_name, sql, status, rows, error, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self._project_id, task.task_id, task.name, task.revision,
+                    source_id, check.kind, check.table, check.sql, status,
+                    int(rows), error[:500], self._now(),
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_write_audit(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM write_audit ORDER BY audit_id DESC LIMIT ?",
+                (max(1, min(200, int(limit))),),
+            ).fetchall()
+        return [
+            {
+                "audit_id": int(row["audit_id"]),
+                "task_id": row["task_id"],
+                "task_name": row["task_name"],
+                "revision": int(row["revision"]),
+                "source_id": row["source_id"],
+                "kind": row["kind"],
+                "table": row["table_name"],
+                "sql": row["sql"],
+                "status": row["status"],
+                "rows": int(row["rows"]),
+                "error": row["error"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------ 写入
     def create(
@@ -770,6 +963,16 @@ def _load_tags(raw: str | None) -> list[str]:
     except (TypeError, ValueError):
         return []
     return [str(v) for v in value] if isinstance(value, list) else []
+
+
+def _load_json_list(raw: str | None) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
 def _clean_tags(tags: tuple[str, ...] | list[str] | None) -> list[str]:

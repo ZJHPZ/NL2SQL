@@ -36,6 +36,9 @@ import type {
   TaskRunResponse,
   TaskUpdateResult,
   ToolsetInfo,
+  WriteAuditResponse,
+  WriteCommitResponse,
+  WriteDryRunResponse,
 } from './types'
 
 export interface ApiError {
@@ -393,7 +396,7 @@ export const api = {
       sql: string
       description?: string
       folder?: string
-      kind?: 'sql' | 'pyspark'
+      kind?: 'sql' | 'pyspark' | 'write'
     },
   ) =>
     request<TaskCreateResult>(
@@ -416,7 +419,7 @@ export const api = {
       sql?: string
       description?: string
       folder?: string
-      kind?: 'sql' | 'pyspark'
+      kind?: 'sql' | 'pyspark' | 'write'
       note?: string
     },
   ) =>
@@ -465,6 +468,35 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
         `${encodeURIComponent(taskId)}/move`,
       { method: 'POST', body: JSON.stringify({ folder }) },
+    ),
+
+  // ------------------------------------------------------------ 受控写（P1）
+  /** 预演写入：服务端在事务里真执行再回滚，返回前后样本与一次性凭据 */
+  writeDryRun: (
+    projectId: string,
+    taskId: string,
+    payload: { source_id?: string } = {},
+  ) =>
+    request<WriteDryRunResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/write/dry-run`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+
+  /** 凭预演凭据提交（confirm 必须显式 true） */
+  writeCommit: (projectId: string, taskId: string, dryRunId: string) =>
+    request<WriteCommitResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/write/commit`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ dry_run_id: dryRunId, confirm: true }),
+      },
+    ),
+
+  writeAudit: (projectId: string, limit = 50) =>
+    request<WriteAuditResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/write-audit?limit=${limit}`,
     ),
 
   // ------------------------------------------------------------ 任务文件夹

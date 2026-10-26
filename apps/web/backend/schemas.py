@@ -227,6 +227,14 @@ class ProjectCreateRequest(BaseModel):
     _v_name = field_validator("name")(_must_not_be_blank)
 
 
+class DataWriteSettings(BaseModel):
+    """项目受控写设置：默认关闭；source_id 指写入目标数据源；上限按行数。"""
+
+    enabled: bool = False
+    source_id: str = Field(default="", max_length=64)
+    max_affected: int = Field(default=100, ge=1, le=1000)
+
+
 class ProjectUpdateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     description: str | None = Field(default=None, max_length=500)
@@ -234,6 +242,7 @@ class ProjectUpdateRequest(BaseModel):
     metrics_path: str | None = Field(default=None, max_length=500)
     planner: str | None = None
     runtime: str | None = None
+    data_write: DataWriteSettings | None = None
 
 
 class SourceRequest(BaseModel):
@@ -274,8 +283,9 @@ class TaskCreateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     source_id: str | None = None
     folder: str = Field(default="", max_length=200, description="任务所在文件夹路径")
-    kind: Literal["sql", "pyspark"] = Field(
-        default="sql", description="任务类型：sql 可运行；pyspark 暂只保存代码"
+    kind: Literal["sql", "pyspark", "write"] = Field(
+        default="sql",
+        description="任务类型：sql 只读可运行；pyspark 暂只保存代码；write 受控写",
     )
 
     _v_name = field_validator("name")(_must_not_be_blank)
@@ -290,7 +300,7 @@ class TaskUpdateRequest(BaseModel):
     enabled: bool | None = None
     source_id: str | None = None
     folder: str | None = Field(default=None, max_length=200)
-    kind: Literal["sql", "pyspark"] | None = None
+    kind: Literal["sql", "pyspark", "write"] | None = None
     note: str = Field(default="", max_length=500)
 
 
@@ -314,3 +324,19 @@ class TaskFolderRenameRequest(BaseModel):
 
 class TaskRunRequest(BaseModel):
     source_id: str | None = None
+
+
+# --------------------------------------------------------------- 受控写（P1）
+class WriteDryRunRequest(BaseModel):
+    """预演写：不传 source_id，一律用项目 data_write 里绑定的目标源。"""
+
+    source_id: str | None = Field(
+        default=None, description="保留字段；P1 只允许项目设置里的写入源",
+    )
+
+
+class WriteCommitRequest(BaseModel):
+    """凭预演凭据提交。must confirm=True，避免误触。"""
+
+    dry_run_id: str = Field(..., min_length=1, max_length=64)
+    confirm: bool = Field(default=False, description="必须显式确认才提交")

@@ -24,6 +24,8 @@ import type {
   TaskRunResponse,
   TaskRunResultPayload,
   TaskSummary,
+  WriteAuditEntry,
+  WriteDryRunResponse,
 } from '../types'
 import { ResultTable } from './ResultTable'
 
@@ -36,12 +38,15 @@ const errText = (r: { error: { error: string; detail: string } }) =>
 const KIND_LABEL: Record<string, string> = {
   sql: 'SQL 查询',
   pyspark: 'PySpark',
+  write: '写入（受控写）',
 }
 
 const KIND_HINT: Record<string, string> = {
   sql: '只读 SELECT / WITH，可直接运行',
   pyspark: '可保存与版本管理，执行器尚未接入',
+  write: '仅单表 INSERT / UPDATE / DELETE，必须带 WHERE；先预演，确认后提交',
 }
+
 
 /** 任务返回值补成 ResultTable 认识的 ResultPayload。 */
 function toResultPayload(r: TaskRunResultPayload): ResultPayload {
@@ -64,8 +69,72 @@ function authorLabel(author: string): string {
   return author || '未知'
 }
 
+const AUDIT_LABEL: Record<string, string> = {
+  preview: '预演',
+  committed: '已提交',
+  rejected: '被拒绝',
+  failed: '失败',
+}
+
+function auditLabel(status: string): string {
+  return AUDIT_LABEL[status] ?? status
+}
+
+function auditBadge(status: string): string {
+  if (status === 'committed') return 'badge badge-ok'
+  if (status === 'preview') return 'badge badge-write'
+  return 'badge badge-warn'
+}
+
 function joinFolder(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name
+}
+
+function kindDotClass(kind: string): string {
+  if (kind === 'pyspark') return 'kind-dot kind-pyspark'
+  if (kind === 'write') return 'kind-dot kind-write'
+  return 'kind-dot'
+}
+
+function kindTag(kind: string): string {
+  if (kind === 'pyspark') return 'py'
+  if (kind === 'write') return 'wr'
+  return 'sql'
+}
+
+/** 受控写预演的前后样本表：before/after 的列可能不同，按并集渲染。 */
+function WriteSampleTable({ rows }: { rows: Record<string, unknown>[] }) {
+  if (!rows.length) return <p className="meta write-diff-empty">没有样本行</p>
+  const cols: string[] = []
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!cols.includes(key)) cols.push(key)
+    }
+  }
+  return (
+    <div className="write-diff-scroll">
+      <table className="write-diff-table mono">
+        <thead>
+          <tr>
+            {cols.map((col) => (
+              <th key={col}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 10).map((row, idx) => (
+            <tr key={idx}>
+              {cols.map((col) => (
+                <td key={col}>
+                  {row[col] === null || row[col] === undefined ? '—' : String(row[col])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 function folderName(path: string): string {
@@ -333,10 +402,10 @@ function TreeFolder({
                 onClick={() => onSelectTask(t.task_id)}
                 title={t.name}
               >
-                <span className={t.kind === 'pyspark' ? 'kind-dot kind-pyspark' : 'kind-dot'} aria-hidden="true" />
+                <span className={kindDotClass(t.kind)} aria-hidden="true" />
                 <span className="tree-task-name">{t.name}</span>
                 <span className="tree-task-meta mono">
-                  {t.kind === 'pyspark' ? 'py' : 'sql'} · v{t.revision}
+                  {kindTag(t.kind)} · v{t.revision}
                 </span>
               </button>
             </li>
@@ -382,7 +451,9 @@ export function TasksPanel({
   const [tabs, setTabs] = useState<{ id: string; name: string }[]>([])
   const [sideQuery, setSideQuery] = useState('')
   /** 底部面板：null = 收起。 */
-  const [bottom, setBottom] = useState<'run' | 'history' | 'info' | null>('run')
+  const [bottom, setBottom] = useState<'run' | 'history' | 'info' | 'audit' | null>(
+    'run',
+  )
   /** 编辑器补全用的数据源表结构（引擎默认库，与任务执行同一源）。 */
   const [editorTables, setEditorTables] = useState<TableInfo[]>([])
   /** 有未保存 SQL 时点了别的 tab：先弹确认，别默默丢改动。 */
@@ -417,10 +488,19 @@ export function TasksPanel({
   const [runResult, setRunResult] = useState<TaskRunResponse | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
 
+  // 受控写（P1）：预演 → 确认提交
+  const [writeResult, setWriteResult] = useState<WriteDryRunResponse | null>(null)
+  const [writeBusy, setWriteBusy] = useState(false)
+  const [commitBusy, setCommitBusy] = useState(false)
+  // 写入审计
+  const [audit, setAudit] = useState<WriteAuditEntry[] | null>(null)
+  const [auditBusy, setAuditBusy] = useState(false)
+  const [auditError, setAuditError] = useState<string | null>(null)
+
   // 新建任务对话框
   const [newTask, setNewTask] = useState<{ folder: string } | null>(null)
   const [ntName, setNtName] = useState('')
-  const [ntKind, setNtKind] = useState<'sql' | 'pyspark'>('sql')
+  const [ntKind, setNtKind] = useState<'sql' | 'pyspark' | 'write'>('sql')
   const [ntDesc, setNtDesc] = useState('')
   const [ntSql, setNtSql] = useState('')
   const [ntBusy, setNtBusy] = useState(false)
@@ -488,7 +568,9 @@ export function TasksPanel({
     setActiveFolder('')
     setTabs([])
     setSideQuery('')
-    setBottom(null)
+    setBottom('run')
+    setWriteResult(null)
+    setAudit(null)
     void refreshAll()
   }, [isDefaultProject, projectId, refreshAll])
 
@@ -513,6 +595,8 @@ export function TasksPanel({
       setDetailError(null)
       setRunResult(null)
       setRunError(null)
+      setWriteResult(null)
+      setAudit(null)
       setBottom('run')
       setSaveMsg(null)
       setSaveError(null)
@@ -686,7 +770,11 @@ export function TasksPanel({
   const runTask = async () => {
     if (!detail) return
     if (detail.task.kind !== 'sql') {
-      setRunError('PySpark 任务执行器尚未接入，当前只能保存与版本管理')
+      setRunError(
+        detail.task.kind === 'write'
+          ? '写入任务不直接运行：请先「预演写入」，确认影响行数后再提交'
+          : 'PySpark 任务执行器尚未接入，当前只能保存与版本管理',
+      )
       return
     }
     if (sqlDirty) {
@@ -707,10 +795,80 @@ export function TasksPanel({
     await loadList()
   }
 
+  /** 写入任务的「预演」：事务里真执行再回滚，拿前后样本与一次性凭据。 */
+  const previewWrite = async () => {
+    if (!detail) return
+    if (sqlDirty) {
+      setRunError('SQL 改动还没保存，预演的是已保存的版本')
+      return
+    }
+    setWriteBusy(true)
+    setRunError(null)
+    setWriteResult(null)
+    const r = await api.writeDryRun(projectId, detail.task.task_id)
+    setWriteBusy(false)
+    if (!r.ok) {
+      setRunError(errText(r))
+      return
+    }
+    setWriteResult(r.data)
+    setBottom('run')
+    // 预演被守门拒绝或执行失败也要落审计，顺手刷新
+    void loadAudit()
+  }
+
+  /** 凭预演凭据确认提交（一次性；任务或 SQL 变过会 409）。 */
+  const commitWrite = async () => {
+    if (!detail || !writeResult?.dry_run_id) return
+    setCommitBusy(true)
+    setRunError(null)
+    const r = await api.writeCommit(
+      projectId,
+      detail.task.task_id,
+      writeResult.dry_run_id,
+    )
+    setCommitBusy(false)
+    if (!r.ok) {
+      setRunError(errText(r))
+      setWriteResult(null)
+      void loadAudit()
+      return
+    }
+    if (r.data.status === 'committed') {
+      setSaveMsg(`已提交写入：${r.data.rows ?? 0} 行受影响`)
+      setWriteResult(null)
+      await reloadDetail()
+      await loadList()
+    } else {
+      setRunError(r.data.reason ?? '写入提交失败')
+      setWriteResult(null)
+    }
+    void loadAudit()
+  }
+
+  const loadAudit = useCallback(async () => {
+    setAuditBusy(true)
+    setAuditError(null)
+    const r = await api.writeAudit(projectId, 50)
+    setAuditBusy(false)
+    if (!r.ok) {
+      setAuditError(errText(r))
+      return
+    }
+    setAudit(r.data.audit ?? [])
+  }, [projectId])
+
+  // 打开「写入审计」时按需拉取（不拖慢任务打开）。
+  useEffect(() => {
+    if (bottom === 'audit' && detail?.task.kind === 'write' && audit === null) {
+      void loadAudit()
+    }
+  }, [bottom, detail, audit, loadAudit])
+
   /** 二期：格式化 SQL（按需懒加载 sql-formatter，不拖慢首屏）。 */
   const formatSql = async () => {
     if (!detail || !sql.trim()) return
-    if (detail.task.kind !== 'sql') {
+    if (detail.task.kind === 'pyspark') {
       setRunError('PySpark 代码暂不支持格式化')
       return
     }
@@ -855,7 +1013,13 @@ export function TasksPanel({
       return
     }
     if (!ntSql.trim()) {
-      setNtError(ntKind === 'sql' ? 'SQL 不能为空' : 'PySpark 代码不能为空')
+      setNtError(
+        ntKind === 'sql'
+          ? 'SQL 不能为空'
+          : ntKind === 'write'
+            ? '写入 SQL 不能为空'
+            : 'PySpark 代码不能为空',
+      )
       return
     }
     setNtBusy(true)
@@ -886,7 +1050,7 @@ export function TasksPanel({
 
   const menuItems: MenuItem[] = menu
     ? [
-        { label: '新建任务', hint: 'SQL / PySpark', onSelect: () => openNewTask(menuFolder) },
+        { label: '新建任务', hint: 'SQL / 写入 / PySpark', onSelect: () => openNewTask(menuFolder) },
         { label: '新建子文件夹', onSelect: () => openNewFolder(menuFolder) },
         { label: '重命名文件夹', onSelect: () => openRenameFolder(menuFolder) },
         { label: '删除文件夹', danger: true, onSelect: () => setDeleteFolder({ path: menuFolder }) },
@@ -916,7 +1080,8 @@ export function TasksPanel({
   const stats = {
     folders: folders?.length ?? 0,
     tasks: tasks?.length ?? 0,
-    sql: (tasks ?? []).filter((t) => t.kind !== 'pyspark').length,
+    sql: (tasks ?? []).filter((t) => t.kind === 'sql').length,
+    write: (tasks ?? []).filter((t) => t.kind === 'write').length,
     pyspark: (tasks ?? []).filter((t) => t.kind === 'pyspark').length,
   }
 
@@ -1022,13 +1187,10 @@ export function TasksPanel({
                           className={selectedId === t.task_id ? 'tree-task active' : 'tree-task'}
                           onClick={() => askNav({ kind: 'task', id: t.task_id })}
                         >
-                          <span
-                            className={t.kind === 'pyspark' ? 'kind-dot kind-pyspark' : 'kind-dot'}
-                            aria-hidden="true"
-                          />
+                          <span className={kindDotClass(t.kind)} aria-hidden="true" />
                           <span className="tree-task-name">{t.name}</span>
                           <span className="tree-task-meta mono">
-                            {t.kind === 'pyspark' ? 'py' : 'sql'} · v{t.revision}
+                            {kindTag(t.kind)} · v{t.revision}
                           </span>
                         </button>
                       </li>
@@ -1079,6 +1241,10 @@ export function TasksPanel({
                 <div className="ide-stat">
                   <b>{stats.sql}</b>
                   <span>SQL 查询</span>
+                </div>
+                <div className="ide-stat">
+                  <b>{stats.write}</b>
+                  <span>写入任务</span>
                 </div>
                 <div className="ide-stat">
                   <b>{stats.pyspark}</b>
@@ -1134,7 +1300,13 @@ export function TasksPanel({
                   onChange={(e) => setName(e.target.value)}
                 />
                 <span
-                  className={detail.task.kind === 'pyspark' ? 'badge badge-warn' : 'badge'}
+                  className={
+                    detail.task.kind === 'pyspark'
+                      ? 'badge badge-warn'
+                      : detail.task.kind === 'write'
+                        ? 'badge badge-write'
+                        : 'badge'
+                  }
                 >
                   {KIND_LABEL[detail.task.kind] ?? detail.task.kind}
                 </span>
@@ -1147,9 +1319,9 @@ export function TasksPanel({
                 <span className="spacer" />
                 <button
                   className="btn btn-ghost btn-tiny"
-                  disabled={detail.task.kind !== 'sql' || !sql.trim()}
+                  disabled={detail.task.kind === 'pyspark' || !sql.trim()}
                   title={
-                    detail.task.kind !== 'sql'
+                    detail.task.kind === 'pyspark'
                       ? 'PySpark 代码暂不支持格式化'
                       : '格式化 SQL（Ctrl+Shift+F）'
                   }
@@ -1165,20 +1337,35 @@ export function TasksPanel({
                 >
                   删除
                 </button>
-                <button
-                  className="btn btn-tiny"
-                  disabled={runBusy || sqlDirty || detail.task.kind !== 'sql'}
-                  title={
-                    detail.task.kind !== 'sql'
-                      ? 'PySpark 执行器尚未接入'
-                      : sqlDirty
-                        ? '先保存再运行'
-                        : '运行已保存的 SQL'
-                  }
-                  onClick={() => void runTask()}
-                >
-                  {runBusy ? '运行中…' : '运行'}
-                </button>
+                {detail.task.kind === 'write' ? (
+                  <button
+                    className="btn btn-tiny"
+                    disabled={writeBusy || sqlDirty}
+                    title={
+                      sqlDirty
+                        ? '先保存再预演'
+                        : '在事务里真执行一次、回滚，看看影响哪些行'
+                    }
+                    onClick={() => void previewWrite()}
+                  >
+                    {writeBusy ? '预演中…' : '预演写入'}
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-tiny"
+                    disabled={runBusy || sqlDirty || detail.task.kind !== 'sql'}
+                    title={
+                      detail.task.kind !== 'sql'
+                        ? 'PySpark 执行器尚未接入'
+                        : sqlDirty
+                          ? '先保存再运行'
+                          : '运行已保存的 SQL'
+                    }
+                    onClick={() => void runTask()}
+                  >
+                    {runBusy ? '运行中…' : '运行'}
+                  </button>
+                )}
                 <button
                   className="btn btn-primary btn-tiny"
                   disabled={saveBusy || !name.trim()}
@@ -1227,7 +1414,9 @@ export function TasksPanel({
                 <span className="meta">
                   {detail.task.kind === 'pyspark'
                     ? KIND_HINT.pyspark
-                    : `只读 ${KIND_HINT.sql}`}
+                    : detail.task.kind === 'write'
+                      ? KIND_HINT.write
+                      : `只读 ${KIND_HINT.sql}`}
                 </span>
                 <span className="spacer" />
                 {sqlDirty ? (
@@ -1250,7 +1439,9 @@ export function TasksPanel({
                     onClick={() => setBottom(bottom === 'run' ? null : 'run')}
                   >
                     运行记录
-                    {runResult && <span className="bottom-dot" aria-hidden="true" />}
+                    {(runResult || writeResult) && (
+                      <span className="bottom-dot" aria-hidden="true" />
+                    )}
                   </button>
                   <button
                     type="button"
@@ -1270,6 +1461,20 @@ export function TasksPanel({
                   >
                     任务信息
                   </button>
+                  {detail.task.kind === 'write' && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={bottom === 'audit'}
+                      className={bottom === 'audit' ? 'bottom-tab active' : 'bottom-tab'}
+                      onClick={() => setBottom(bottom === 'audit' ? null : 'audit')}
+                    >
+                      写入审计
+                      {audit && audit.length > 0 && (
+                        <span className="bottom-count mono">{audit.length}</span>
+                      )}
+                    </button>
+                  )}
                   <span className="spacer" />
                   <span className="meta mono">
                     {bottom ? '点当前标签收起' : '点标签展开'}
@@ -1280,33 +1485,103 @@ export function TasksPanel({
                   <div className="bottom-body">
                     {bottom === 'run' && (
                       <>
-                        {!runResult && !runBusy && (
-                          <p className="meta bottom-empty">
-                            还没有运行记录。保存后点「运行」，结果与耗时显示在这里。
-                          </p>
-                        )}
-                        {runBusy && <p className="meta">正在运行已保存的 SQL…</p>}
-                        {runResult && (
+                        {detail.task.kind === 'write' ? (
                           <>
-                            <div className="bottom-run-head">
-                              <span className={runResult.ok ? 'badge badge-ok' : 'badge badge-warn'}>
-                                {runResult.ok ? '成功' : runResult.status}
-                              </span>
-                              <span className="meta mono">
-                                {runResult.result
-                                  ? `${runResult.result.row_count ?? 0} 行 · ${runResult.result.elapsed_ms ?? 0} ms`
-                                  : '未返回结果集'}
-                              </span>
-                              <span className="spacer" />
-                              <span className="meta mono">{runResult.sql}</span>
-                            </div>
-                            {runResult.result ? (
-                              <ResultTable result={toResultPayload(runResult.result)} />
-                            ) : (
-                              <div className="alert alert-warn">
-                                <strong>{runResult.status}</strong>
-                                {runResult.message}
+                            {!writeResult && !writeBusy && (
+                              <p className="meta bottom-empty">
+                                还没有预演记录。保存后点「预演写入」：服务端会在事务里真执行一次、统计影响行数，然后回滚；确认后才真正写入测试库。
+                              </p>
+                            )}
+                            {writeBusy && (
+                              <p className="meta">正在预演（事务内执行后回滚）…</p>
+                            )}
+                            {writeResult && writeResult.status === 'preview' && (
+                              <>
+                                <div className="bottom-run-head">
+                                  <span className="badge badge-write">预演通过</span>
+                                  <span className="meta mono">
+                                    {(writeResult.kind ?? '').toUpperCase()}{' '}
+                                    {writeResult.table} · 将影响 {writeResult.rows ?? 0} 行
+                                    · 上限 {writeResult.max_affected ?? '—'}
+                                  </span>
+                                  <span className="spacer" />
+                                  <button
+                                    className="btn btn-cancel btn-tiny"
+                                    disabled={commitBusy}
+                                    onClick={() => void commitWrite()}
+                                  >
+                                    {commitBusy ? '提交中…' : '确认提交'}
+                                  </button>
+                                </div>
+                                <p className="meta bottom-history-hint">
+                                  预演已回滚，数据未改。确认提交才会真正写入测试库；凭据 5
+                                  分钟内有效，期间任务被修改并保存后需重新预演。
+                                </p>
+                                <div className="write-diff">
+                                  <div className="write-diff-col">
+                                    <div className="write-diff-title mono">
+                                      执行前样本（最多 20 行）
+                                    </div>
+                                    <WriteSampleTable rows={writeResult.before ?? []} />
+                                  </div>
+                                  <div className="write-diff-col">
+                                    <div className="write-diff-title mono">
+                                      执行后样本（事务内，已回滚）
+                                    </div>
+                                    <WriteSampleTable rows={writeResult.after ?? []} />
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                            {writeResult && writeResult.status !== 'preview' && (
+                              <div className="alert alert-bad">
+                                <strong>
+                                  {writeResult.status === 'blocked'
+                                    ? '被守门拒绝'
+                                    : '执行失败'}
+                                </strong>
+                                {writeResult.reason}
+                                {writeResult.rule && (
+                                  <span className="meta mono">规则：{writeResult.rule}</span>
+                                )}
                               </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {!runResult && !runBusy && (
+                              <p className="meta bottom-empty">
+                                还没有运行记录。保存后点「运行」，结果与耗时显示在这里。
+                              </p>
+                            )}
+                            {runBusy && <p className="meta">正在运行已保存的 SQL…</p>}
+                            {runResult && (
+                              <>
+                                <div className="bottom-run-head">
+                                  <span
+                                    className={
+                                      runResult.ok ? 'badge badge-ok' : 'badge badge-warn'
+                                    }
+                                  >
+                                    {runResult.ok ? '成功' : runResult.status}
+                                  </span>
+                                  <span className="meta mono">
+                                    {runResult.result
+                                      ? `${runResult.result.row_count ?? 0} 行 · ${runResult.result.elapsed_ms ?? 0} ms`
+                                      : '未返回结果集'}
+                                  </span>
+                                  <span className="spacer" />
+                                  <span className="meta mono">{runResult.sql}</span>
+                                </div>
+                                {runResult.result ? (
+                                  <ResultTable result={toResultPayload(runResult.result)} />
+                                ) : (
+                                  <div className="alert alert-warn">
+                                    <strong>{runResult.status}</strong>
+                                    {runResult.message}
+                                  </div>
+                                )}
+                              </>
                             )}
                           </>
                         )}
@@ -1396,7 +1671,7 @@ export function TasksPanel({
                           <select
                             value={detail.task.kind}
                             onChange={(e) => {
-                              const kind = e.target.value as 'sql' | 'pyspark'
+                              const kind = e.target.value as 'sql' | 'pyspark' | 'write'
                               if (kind === detail.task.kind) return
                               void (async () => {
                                 setSaveBusy(true)
@@ -1417,6 +1692,7 @@ export function TasksPanel({
                           >
                             <option value="sql">SQL 查询</option>
                             <option value="pyspark">PySpark</option>
+                            <option value="write">写入（受控写）</option>
                           </select>
                         </label>
                         <label className="field span2">
@@ -1435,6 +1711,68 @@ export function TasksPanel({
                             placeholder="例如：口径改成含退款"
                           />
                         </label>
+                      </div>
+                    )}
+
+                    {bottom === 'audit' && (
+                      <div className="bottom-audit">
+                        <div className="meta bottom-history-hint">
+                          预演 / 提交 / 被拦都会留审计；写入只作用于项目绑定的 SQLite 测试库。
+                          <button
+                            className="linkbtn"
+                            disabled={auditBusy}
+                            onClick={() => void loadAudit()}
+                          >
+                            {auditBusy ? '刷新中…' : '刷新'}
+                          </button>
+                        </div>
+                        {auditError && <div className="alert alert-bad">{auditError}</div>}
+                        {auditBusy && !audit && <p className="meta">正在载入审计…</p>}
+                        {audit && audit.length === 0 && (
+                          <p className="meta bottom-empty">还没有写入记录。</p>
+                        )}
+                        {audit && audit.length > 0 && (
+                          <div className="write-diff-scroll">
+                            <table className="write-audit-table">
+                              <thead>
+                                <tr>
+                                  <th>时间</th>
+                                  <th>状态</th>
+                                  <th>操作</th>
+                                  <th>表</th>
+                                  <th>行数</th>
+                                  <th>任务</th>
+                                  <th>SQL / 原因</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {audit.map((entry) => (
+                                  <tr key={entry.audit_id}>
+                                    <td className="mono">{entry.created_at}</td>
+                                    <td>
+                                      <span className={auditBadge(entry.status)}>
+                                        {auditLabel(entry.status)}
+                                      </span>
+                                    </td>
+                                    <td className="mono">{entry.kind}</td>
+                                    <td className="mono">{entry.table_name}</td>
+                                    <td className="mono">{entry.rows}</td>
+                                    <td>
+                                      {entry.task_name}{' '}
+                                      <span className="meta mono">v{entry.revision}</span>
+                                    </td>
+                                    <td
+                                      className="mono write-audit-sql"
+                                      title={entry.error || entry.sql}
+                                    >
+                                      {entry.error || entry.sql}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1472,9 +1810,13 @@ export function TasksPanel({
             </label>
             <label className="field">
               <span>任务类型</span>
-              <select value={ntKind} onChange={(e) => setNtKind(e.target.value as 'sql' | 'pyspark')}>
+              <select
+                value={ntKind}
+                onChange={(e) => setNtKind(e.target.value as 'sql' | 'pyspark' | 'write')}
+              >
                 <option value="sql">SQL 查询（可运行）</option>
                 <option value="pyspark">PySpark（可保存，执行器未接入）</option>
+                <option value="write">写入（受控写，先预演再提交）</option>
               </select>
             </label>
             <label className="field span2">
@@ -1482,13 +1824,25 @@ export function TasksPanel({
               <input value={ntDesc} onChange={(e) => setNtDesc(e.target.value)} />
             </label>
             <label className="field span2">
-              <span>{ntKind === 'pyspark' ? 'PySpark 代码' : 'SQL（只读）'}</span>
+              <span>
+                {ntKind === 'pyspark'
+                  ? 'PySpark 代码'
+                  : ntKind === 'write'
+                    ? '写入 SQL（单条 INSERT / UPDATE / DELETE，必须带 WHERE）'
+                    : 'SQL（只读）'}
+              </span>
               <textarea
                 className="sql-editor mono"
                 rows={10}
                 value={ntSql}
                 spellCheck={false}
-                placeholder={ntKind === 'pyspark' ? '例如：df = spark.read...' : 'SELECT ...'}
+                placeholder={
+                  ntKind === 'pyspark'
+                    ? '例如：df = spark.read...'
+                    : ntKind === 'write'
+                      ? 'UPDATE probe_order SET status = \'paid\' WHERE order_id = 1'
+                      : 'SELECT ...'
+                }
                 onChange={(e) => setNtSql(e.target.value)}
               />
             </label>

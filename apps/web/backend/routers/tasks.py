@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -17,8 +18,15 @@ from fastapi import APIRouter, HTTPException, Request
 
 from nl2sql.contracts.pipeline import QueryOutcome
 from nl2sql.errors import NL2SQLError, QueryTimeoutError
-from nl2sql.tasks import DEFAULT_TASK_FOLDERS, TASK_KIND_SQL, TaskStore
+from nl2sql.guard.write import WriteGuard
+from nl2sql.tasks import (
+    DEFAULT_TASK_FOLDERS,
+    TASK_KIND_SQL,
+    TASK_KIND_WRITE,
+    TaskStore,
+)
 
+from .. import write_runner
 from ..projects import DEFAULT_PROJECT_ID, ProjectHub
 from ..schemas import (
     TaskCreateRequest,
@@ -27,6 +35,8 @@ from ..schemas import (
     TaskMoveRequest,
     TaskRunRequest,
     TaskUpdateRequest,
+    WriteCommitRequest,
+    WriteDryRunRequest,
 )
 from ..serializers import outcome_to_response
 
@@ -262,6 +272,12 @@ def run_task(project_id: str, task_id: str, req: TaskRunRequest,
     hub = _hub(request)
     store, engine = _store_for(hub, project_id)
     task = _task_or_404(store, task_id)
+    if task.kind == TASK_KIND_WRITE:
+        raise HTTPException(
+            status_code=400,
+            detail="写入任务不能直接运行：请先「预演写入」查看影响行数与前后对比，"
+                   "再显式确认提交（只读执行链路不会执行写语句）",
+        )
     if task.kind != TASK_KIND_SQL:
         # 如实拒绝：PySpark 只有存储与版本，没有执行器。不能假装能跑。
         raise HTTPException(
@@ -300,6 +316,208 @@ def run_task(project_id: str, task_id: str, req: TaskRunRequest,
     payload = outcome_to_response(outcome, planner_mode="task").model_dump()
     payload["task"] = _summary(store.get(task_id) or task)
     return payload
+
+
+def _project_meta(hub: ProjectHub, project_id: str) -> dict[str, Any]:
+    try:
+        meta = hub.store.get(project_id)
+    except NL2SQLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在：{project_id}")
+    return meta
+
+
+def _write_target(hub: ProjectHub, project_id: str, source_id: str,
+                  store: TaskStore) -> tuple[str, dict[str, Any]]:
+    """解析受控写的目标库路径；任何一项不满足都如实拒绝。"""
+    meta = _project_meta(hub, project_id)
+    settings = meta.get("data_write") or {}
+    if not settings.get("enabled"):
+        raise HTTPException(
+            status_code=403,
+            detail="项目未开启受控写。请到项目设置里显式开启，并绑定一个 "
+                   "SQLite 测试库；问答与只读任务永远不写业务数据",
+        )
+    target_id = str(settings.get("source_id") or "")
+    if not target_id:
+        raise HTTPException(status_code=400,
+                            detail="项目尚未绑定写入数据源，请先在项目设置里选择")
+    if source_id and source_id != target_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"写入目标只能是项目绑定的数据源 {target_id}",
+        )
+    source = next(
+        (s for s in meta.get("sources") or []
+         if str(s.get("source_id") or "") == target_id),
+        None,
+    )
+    if source is None:
+        raise HTTPException(status_code=400,
+                            detail=f"写入数据源不存在：{target_id}")
+    if str(source.get("adapter") or "") != "sqlite":
+        raise HTTPException(
+            status_code=400,
+            detail="P1 受控写只支持 SQLite 测试库；MySQL / PostgreSQL / JDBC "
+                   "的写事务与回滚语义尚未接入",
+        )
+    path = str(source.get("path") or "")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=400,
+                            detail=f"写入数据源文件不存在：{path or '（空）'}")
+    if os.path.abspath(path) == os.path.abspath(str(store.path)):
+        raise HTTPException(
+            status_code=400,
+            detail="写入目标不能是任务库（tasks.db）本身",
+        )
+    return path, settings
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/write/dry-run")
+def write_dry_run(project_id: str, task_id: str, req: WriteDryRunRequest,
+                  request: Request) -> dict[str, Any]:
+    """预演写入：事务里真执行一次、统计影响行数、取前后样本，然后回滚。"""
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    task = _task_or_404(store, task_id)
+    if task.kind != TASK_KIND_WRITE:
+        raise HTTPException(
+            status_code=400,
+            detail="只有「写入」任务可以预演写入；SQL 任务请直接运行（只读）",
+        )
+    db_path, settings = _write_target(
+        hub, project_id, req.source_id or "", store)
+    max_affected = int(settings.get("max_affected") or 100)
+    source_id = str(settings.get("source_id") or "")
+    guard = WriteGuard(max_affected=max_affected)
+    check = guard.check(task.sql)
+    if not check.allowed:
+        audit_id = store.record_write_audit(
+            task=task, source_id=source_id, check=check,
+            status="rejected", error=check.reason,
+        )
+        return {
+            "status": "blocked", "reason": check.reason, "rule": check.rule,
+            "sql": task.sql, "audit_id": audit_id, "task": _summary(task),
+            "max_affected": max_affected,
+        }
+    try:
+        preview = write_runner.dry_run(
+            db_path, check, max_affected=max_affected)
+    except write_runner.WriteRunError as exc:
+        audit_id = store.record_write_audit(
+            task=task, source_id=source_id, check=check,
+            status="failed", error=exc.message,
+        )
+        return {
+            "status": "failed", "reason": exc.message, "rule": exc.rule,
+            "sql": task.sql, "audit_id": audit_id, "task": _summary(task),
+            "max_affected": max_affected,
+        }
+    saved = store.save_dry_run(
+        task_id=task.task_id, revision=task.revision, source_id=source_id,
+        check=check, rows=int(preview["rows"]),
+        before=preview["before"], after=preview["after"],
+    )
+    audit_id = store.record_write_audit(
+        task=task, source_id=source_id, check=check,
+        status="preview", rows=int(preview["rows"]),
+    )
+    return {
+        "status": "preview",
+        "dry_run_id": saved["dry_run_id"],
+        "expires_at": saved["expires_at"],
+        "rows": preview["rows"],
+        "before": preview["before"],
+        "after": preview["after"],
+        "kind": check.kind,
+        "table": check.table,
+        "sql": task.sql,
+        "audit_id": audit_id,
+        "task": _summary(task),
+        "max_affected": max_affected,
+    }
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/write/commit")
+def write_commit(project_id: str, task_id: str, req: WriteCommitRequest,
+                 request: Request) -> dict[str, Any]:
+    """凭预演凭据提交。提交前复核 revision、SQL 与行数上限，全部一致才落库。"""
+    if not req.confirm:
+        raise HTTPException(status_code=400,
+                            detail="提交前必须显式确认（confirm=true）")
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    task = _task_or_404(store, task_id)
+    if task.kind != TASK_KIND_WRITE:
+        raise HTTPException(status_code=400,
+                            detail="只有「写入」任务可以提交写入")
+    dry = store.get_dry_run(req.dry_run_id)
+    if dry is None:
+        raise HTTPException(
+            status_code=400,
+            detail="预演凭据不存在或已过期（5 分钟有效）；请重新预演",
+        )
+    if dry["project_id"] != project_id or dry["task_id"] != task_id:
+        raise HTTPException(status_code=400,
+                            detail="预演凭据与当前项目/任务不匹配")
+    if task.revision != dry["revision"] or task.sql.strip() != dry["sql"].strip():
+        store.delete_dry_run(req.dry_run_id)
+        raise HTTPException(
+            status_code=409,
+            detail="任务在预演后又被修改过；为避免按旧预演提交，请重新预演",
+        )
+    db_path, settings = _write_target(
+        hub, project_id, dry["source_id"], store)
+    max_affected = int(settings.get("max_affected") or 100)
+    source_id = str(settings.get("source_id") or "")
+    guard = WriteGuard(max_affected=max_affected)
+    check = guard.check(task.sql)
+    if not check.allowed:
+        store.delete_dry_run(req.dry_run_id)
+        audit_id = store.record_write_audit(
+            task=task, source_id=source_id, check=check,
+            status="rejected", error=check.reason,
+        )
+        return {"status": "blocked", "reason": check.reason,
+                "rule": check.rule, "audit_id": audit_id}
+    try:
+        done = write_runner.commit(
+            db_path, check, max_affected=max_affected)
+    except write_runner.WriteRunError as exc:
+        store.delete_dry_run(req.dry_run_id)
+        audit_id = store.record_write_audit(
+            task=task, source_id=source_id, check=check,
+            status="failed", error=exc.message,
+        )
+        return {"status": "failed", "reason": exc.message, "rule": exc.rule,
+                "audit_id": audit_id}
+    store.delete_dry_run(req.dry_run_id)
+    audit_id = store.record_write_audit(
+        task=task, source_id=source_id, check=check,
+        status="committed", rows=int(done["rows"]),
+    )
+    return {
+        "status": "committed",
+        "rows": done["rows"],
+        "kind": check.kind,
+        "table": check.table,
+        "before": done["before"],
+        "audit_id": audit_id,
+        "task": _summary(store.get(task_id) or task),
+    }
+
+
+@router.get("/projects/{project_id}/write-audit")
+def list_write_audit(project_id: str, request: Request,
+                     limit: int = 50) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    return {
+        "project_id": project_id,
+        "audit": store.list_write_audit(limit=_clamp_limit(limit, 50, 200)),
+    }
 
 
 def _execute_readonly(engine: Any, adapter: Any, cache: Any, guard: Any,
