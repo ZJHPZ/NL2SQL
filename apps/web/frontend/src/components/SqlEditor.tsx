@@ -47,6 +47,7 @@ import {
 import { sql, SQLite, type SQLNamespace } from '@codemirror/lang-sql'
 import { tags } from '@lezer/highlight'
 import type { TableInfo } from '../types'
+import { schemaLinter } from './sqlLint'
 
 /**
  * Tab 缩进：用两个空格，而不是 CodeMirror 默认的制表符。
@@ -76,6 +77,8 @@ interface SqlEditorProps {
   ariaLabel: string
   /** Ctrl/Cmd+Enter */
   onSave: () => void
+  /** Ctrl/Cmd+Shift+F：格式化（由父组件实现，PySpark 任务可不传） */
+  onFormat?: () => void
 }
 
 /** 把表/列元数据转成 CodeMirror 的补全命名空间。 */
@@ -223,6 +226,26 @@ const paperTheme = EditorView.theme(
       color: 'rgba(244, 239, 226, 0.72)',
     },
     '.cm-completionIcon': { display: 'none' },
+    // 二期：DDL lint 的波浪线与提示框，保持纸面墨线语言。
+    '.cm-lintRange-warning': {
+      textDecoration: 'underline wavy var(--ochre) 1px',
+      textUnderlineOffset: '3px',
+    },
+    '.cm-lintRange-error': {
+      textDecoration: 'underline wavy var(--vermilion) 1px',
+      textUnderlineOffset: '3px',
+    },
+    '.cm-tooltip-lint': { padding: '0' },
+    '.cm-diagnostic': {
+      fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+      fontSize: '11.5px',
+      lineHeight: '18px',
+      padding: '6px 10px 6px 9px',
+      borderLeft: '3px solid var(--ochre)',
+    },
+    '.cm-diagnostic-error': { borderLeftColor: 'var(--vermilion)' },
+    '.cm-diagnosticText': { color: 'var(--ink)' },
+    '.cm-diagnosticSource': { display: 'none' },
   },
   { dark: false },
 )
@@ -233,6 +256,7 @@ export default function SqlEditor({
   tables,
   ariaLabel,
   onSave,
+  onFormat,
 }: SqlEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -240,8 +264,10 @@ export default function SqlEditor({
   const syncingRef = useRef(false)
   const onChangeRef = useRef(onChange)
   const onSaveRef = useRef(onSave)
+  const onFormatRef = useRef(onFormat)
   onChangeRef.current = onChange
   onSaveRef.current = onSave
+  onFormatRef.current = onFormat
 
   const schemaCompartment = useRef(new Compartment())
 
@@ -279,19 +305,29 @@ export default function SqlEditor({
               return true
             },
           },
+          {
+            key: 'Shift-Mod-f',
+            run: () => {
+              const format = onFormatRef.current
+              if (!format) return false
+              format()
+              return true
+            },
+          },
           ...closeBracketsKeymap,
           ...defaultKeymap,
           ...historyKeymap,
           ...completionKeymap,
           { key: 'Tab', run: insertTwoSpaces, shift: indentLess },
         ]),
-        schemaCompartment.current.of(
+        schemaCompartment.current.of([
           sql({
             dialect: SQLite,
             schema: buildSchema(tables),
             upperCaseKeywords: true,
           }),
-        ),
+          schemaLinter(tables),
+        ]),
         paperTheme,
         syntaxHighlighting(paperHighlight),
         EditorView.contentAttributes.of({
@@ -333,18 +369,19 @@ export default function SqlEditor({
     syncingRef.current = false
   }, [value])
 
-  // 表结构加载完成后重配补全（不重建编辑器，保留文档与历史）。
+  // 表结构加载完成后重配补全与 lint（不重建编辑器，保留文档与历史）。
   useEffect(() => {
     const view = viewRef.current
     if (!view) return
     view.dispatch({
-      effects: schemaCompartment.current.reconfigure(
+      effects: schemaCompartment.current.reconfigure([
         sql({
           dialect: SQLite,
           schema: buildSchema(tables),
           upperCaseKeywords: true,
         }),
-      ),
+        schemaLinter(tables),
+      ]),
     })
   }, [tables])
 

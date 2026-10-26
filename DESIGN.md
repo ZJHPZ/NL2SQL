@@ -158,7 +158,26 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
 - **行为不变**：Ctrl+Enter 保存、Tab/Shift+Tab 缩进、未保存切换确认、beforeunload
   提醒全部保留；编辑器按需懒加载（`SqlEditor` 独立 chunk，不拖慢首屏）。
 - **边界**：高亮不重排文本、不改写用户大小写；PySpark 任务只用高亮/括号闭合，
-  不投喂 SQL 补全数据；未知表/列暂不画错误波浪线（二期：基于 DDL 的 lint）。
+  不投喂 SQL 补全数据；未知表/列见下节 lint。
 - **验证**：tsc 0、build 通过（主包 gzip 109.88kB，编辑器 chunk gzip 126.33kB 懒加载）；
   E2E axe 七态 0、运行时 0、失败请求 0；IDE 探针（CM 几何、gutter 54px、无重叠）、
   dirty_probe 13 项、移动端单列全部通过。
+
+### 二期：DDL 诊断 + 格式化（v12.1，2026-10-26）
+
+- **DDL 诊断**（`apps/web/frontend/src/components/sqlLint.ts`，`@codemirror/lint`
+  的 `linter(callback, { delay: 500 })`）：按 SQL 语法树逐个 `Statement` 扫
+  `FROM/JOIN` 表引用（支持 `schema.表`）与「别名/表名.列」限定列；字符串、`--`
+  与 `/* */` 注释先等长遮罩，避免误报；`WITH` 定义的 CTE 视为「列不可知」跳过；
+  裸列、函数、子查询一律不报（宁少报不误报）。表结构为空时关闭。
+- **呈现**：未知表 / 未知限定列用赭石波浪线（`text-decoration: underline wavy`），
+  悬停浮层为纸面 + 墨边，左侧 3px 赭石条，文案「未知表「x」：当前数据源里没有
+  这张表」「未知列「a.b」：t 没有这一列」；错误级保留朱红（本期不产生）。
+- **格式化**：工具条「格式化」按钮或 `Ctrl+Shift+F`，按需 `import('sql-formatter')`
+  （sqlite 方言、关键字大写、2 空格缩进、`expressionWidth 56`、多语句空行），
+  格式化后 `setSql` + 标脏并提示「已格式化，保存后生效」；PySpark 任务按钮禁用并
+  提示「暂不支持格式化」。
+- **验证**：`_tmp/e2e/lint_probe.mjs`——未知表 + 未知列各 1 条波浪线、悬停文案正确、
+  格式化后 `SELECT/FROM` 大写 + 多行缩进 + 脏标记，axe 0、运行时 0；全量 E2E
+  axe 七态 0、ide_probe/dirty_probe/completion_probe 全绿；构建主包 gzip 110.27kB、
+  编辑器 chunk gzip 134.25kB、sql-formatter chunk gzip 76.33kB（均按需懒加载）。

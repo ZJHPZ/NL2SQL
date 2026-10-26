@@ -707,6 +707,39 @@ export function TasksPanel({
     await loadList()
   }
 
+  /** 二期：格式化 SQL（按需懒加载 sql-formatter，不拖慢首屏）。 */
+  const formatSql = async () => {
+    if (!detail || !sql.trim()) return
+    if (detail.task.kind !== 'sql') {
+      setRunError('PySpark 代码暂不支持格式化')
+      return
+    }
+    try {
+      setSaveError(null)
+      setRunError(null)
+      const { format } = await import('sql-formatter')
+      const next = format(sql, {
+        language: 'sqlite',
+        keywordCase: 'upper',
+        tabWidth: 2,
+        useTabs: false,
+        expressionWidth: 56,
+        linesBetweenQueries: 2,
+      })
+      if (next === sql) {
+        setSaveMsg('SQL 已经是格式化状态')
+        return
+      }
+      setSql(next)
+      setSqlDirty(true)
+      setSaveMsg('已格式化，保存后生效')
+    } catch (err) {
+      setSaveError(
+        `格式化失败：${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
   const submitDeleteTask = async () => {
     if (!deleteTask) return
     setDeleteBusy(true)
@@ -1114,6 +1147,18 @@ export function TasksPanel({
                 <span className="spacer" />
                 <button
                   className="btn btn-ghost btn-tiny"
+                  disabled={detail.task.kind !== 'sql' || !sql.trim()}
+                  title={
+                    detail.task.kind !== 'sql'
+                      ? 'PySpark 代码暂不支持格式化'
+                      : '格式化 SQL（Ctrl+Shift+F）'
+                  }
+                  onClick={() => void formatSql()}
+                >
+                  格式化
+                </button>
+                <button
+                  className="btn btn-ghost btn-tiny"
                   onClick={() =>
                     setDeleteTask({ taskId: detail.task.task_id, name: detail.task.name })
                   }
@@ -1169,6 +1214,11 @@ export function TasksPanel({
                       detail.task.kind === 'pyspark' ? 'PySpark 代码' : 'SQL 代码'
                     }
                     onSave={() => void saveTask()}
+                    onFormat={
+                      detail.task.kind === 'sql'
+                        ? () => void formatSql()
+                        : undefined
+                    }
                   />
                 </Suspense>
               </div>
@@ -1185,7 +1235,9 @@ export function TasksPanel({
                 ) : (
                   <span className="meta mono">{lineCount} 行 · 已保存</span>
                 )}
-                <span className="meta mono">Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全</span>
+                <span className="meta mono">
+                  Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全 · Ctrl+Shift+F 格式化
+                </span>
               </div>
 
               <div className="bottom-panel">
