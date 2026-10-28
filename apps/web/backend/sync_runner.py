@@ -4,14 +4,15 @@
 ----
 * **读**走项目已装配好的只读适配器（sqlite / mysql / postgres），
   与问答、任务执行共用同一个连接层；不额外开可写连接。
-* **写**只写项目绑定的 SQLite 写库（受控写目标），用独立事务；
-  非 SQLite 目标在 P1 一律拒绝（`_sync_target` 校验）。
+* **写**写项目绑定的同步目标：SQLite 测试库（本地文件）或 MySQL 实验库。
+  目标为 MySQL 时使用项目 secrets 里的专用账号直连，只对绑定库生效；
+  PostgreSQL / JDBC 目标在 P1 一律拒绝（`_sync_target` 校验）。
 * 与受控写共用同一套防线思路：**先预演、后确认**——预演只读源表、
   不改目标库；提交前重新读一遍源表，行数/水位不一致就要求重新预演。
 
 目标表不存在时按源表列名/类型自动建表（只做这一种 DDL）。类型映射刻意
-保守：整数 → INTEGER，浮点/数值 → REAL，其余 → TEXT；不复制主键/索引/
-约束——同步任务是「搬数据」，不是 schema 迁移工具。
+保守：整数 → INTEGER/INT，浮点/数值 → REAL/DOUBLE，其余 → TEXT；不复制
+主键/索引/约束——同步任务是「搬数据」，不是 schema 迁移工具。
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ from .task_exec import _pipeline
 
 _NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 _IDENT_OK_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_TARGET_ADAPTERS = ("sqlite", "mysql")
+_MYSQL_SYSTEM_DBS = ("mysql", "information_schema", "performance_schema", "sys")
 
 
 class SyncError(Exception):
@@ -43,8 +46,72 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _target_adapter(target: dict[str, Any]) -> str:
+    adapter = str(target.get("adapter") or "sqlite").strip().lower()
+    if adapter not in _TARGET_ADAPTERS:
+        raise SyncError(
+            f"同步目标暂不支持 {adapter or '未知'}；P1 支持 SQLite 测试库与 "
+            "MySQL 实验库",
+            rule="target_unsupported",
+        )
+    return adapter
+
+
+def _mysql_connect(target: dict[str, Any]) -> Any:
+    """连 MySQL 实验库；pymysql 是可选的 web 依赖，缺了如实报错。"""
+    try:
+        import pymysql  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - 环境未装 pymysql
+        raise SyncError(
+            "MySQL 同步目标需要 pymysql；请先安装：pip install pymysql",
+            rule="target_driver_missing",
+        ) from exc
+    database = str(target.get("database") or "").strip()
+    if database.lower() in _MYSQL_SYSTEM_DBS:
+        raise SyncError(
+            f"不能把 MySQL 系统库 {database} 当作同步目标", rule="target_unsafe")
+    return pymysql.connect(
+        host=str(target.get("host") or "127.0.0.1"),
+        port=int(target.get("port") or 3306),
+        user=str(target.get("user") or ""),
+        password=str(target.get("password") or ""),
+        database=database,
+        charset="utf8mb4",
+        connect_timeout=5.0,
+        autocommit=False,
+    )
+
+
 def _quote(identifier: str) -> str:
     return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _backtick(identifier: str) -> str:
+    return "`" + str(identifier).replace("`", "``") + "`"
+
+
+def _quote_for(adapter: str, identifier: str) -> str:
+    return _backtick(identifier) if adapter == "mysql" else _quote(identifier)
+
+
+def _source_family(engine: Any, source_id: str) -> str:
+    """按源适配器选标识符引用方式（MySQL 用反引号）。"""
+    try:
+        config = engine.config.resolve_source(source_id)
+        adapter = str(getattr(config, "adapter", "") or "").lower()
+        if adapter:
+            return adapter
+    except Exception:  # noqa: BLE001 - 拿不到配置时退回类名推断
+        pass
+    try:
+        name = type(_adapter(engine, source_id)).__name__.lower()
+    except Exception:  # noqa: BLE001
+        return ""
+    if "mysql" in name:
+        return "mysql"
+    if "postgres" in name:
+        return "postgres"
+    return "sqlite"
 
 
 def _jsonable(value: Any) -> Any:
@@ -107,8 +174,10 @@ def read_sync_rows(
     table = config["table"]
     mode = config["mode"]
     watermark = config.get("watermark") or ""
+    quote = lambda ident: _quote_for(  # noqa: E731
+        _source_family(engine, config["source_id"]), ident)
 
-    sql = f"SELECT * FROM {_quote(table)}"
+    sql = f"SELECT * FROM {quote(table)}"
     if mode == "incremental" and after:
         if not watermark:
             raise SyncError(
@@ -118,8 +187,8 @@ def read_sync_rows(
                 f"增量列「{watermark}」不在源表 {table} 中",
                 rule="watermark_missing",
             )
-        sql += f" WHERE {_quote(watermark)} > {_sql_literal(after)}" \
-               f" ORDER BY {_quote(watermark)}"
+        sql += f" WHERE {quote(watermark)} > {_sql_literal(after)}" \
+               f" ORDER BY {quote(watermark)}"
 
     adapter = _adapter(engine, config["source_id"])
     timeout_s = 60.0
@@ -139,20 +208,41 @@ def read_sync_rows(
 
 
 # ---------------------------------------------------------------- 目标表
-def target_table_exists(db_path: str, table: str) -> bool:
-    with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table,),
-        ).fetchone()
-    return row is not None
-
-
-def _count_rows(conn: sqlite3.Connection, table: str) -> int:
+def target_table_exists(target: dict[str, Any], table: str) -> bool:
+    adapter = _target_adapter(target)
+    if adapter == "sqlite":
+        with _connect(str(target.get("path") or "")) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+        return row is not None
+    conn = _mysql_connect(target)
     try:
-        return int(conn.execute(
-            f"SELECT COUNT(*) FROM {_quote(table)}").fetchone()[0])
-    except sqlite3.Error:
+        with conn.cursor() as cur:
+            cur.execute("SHOW TABLES LIKE %s", (table,))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _count_rows(target: dict[str, Any], table: str) -> int:
+    adapter = _target_adapter(target)
+    quote = lambda ident: _quote_for(adapter, ident)  # noqa: E731
+    try:
+        if adapter == "sqlite":
+            with _connect(str(target.get("path") or "")) as conn:
+                return int(conn.execute(
+                    f"SELECT COUNT(*) FROM {quote(table)}").fetchone()[0])
+        conn = _mysql_connect(target)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {quote(table)}")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - 目标表不存在/读不到时按 0 行展示
         return 0
 
 
@@ -165,16 +255,33 @@ def _sqlite_type(data_type: str) -> str:
     return "TEXT"
 
 
+def _mysql_type(data_type: str) -> str:
+    text = (data_type or "").upper()
+    if "INT" in text:
+        return "INT"
+    if any(token in text for token in ("REAL", "FLOA", "DOUB", "NUM", "DEC")):
+        return "DOUBLE"
+    return "TEXT"
+
+
 def _ensure_target_table(
-    conn: sqlite3.Connection, table: str, meta: TableMeta
+    conn: Any, target: dict[str, Any], table: str, meta: TableMeta
 ) -> bool:
     """目标表不存在时按源列建表；返回是否新建。"""
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
-    if row is not None:
-        return False
+    adapter = _target_adapter(target)
+    quote = lambda ident: _quote_for(adapter, ident)  # noqa: E731
+    if adapter == "sqlite":
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if row is not None:
+            return False
+    else:
+        with conn.cursor() as cur:
+            cur.execute("SHOW TABLES LIKE %s", (table,))
+            if cur.fetchone() is not None:
+                return False
     if not meta.columns:
         raise SyncError(
             f"源表「{meta.name}」没有可同步的列", rule="source_columns_missing")
@@ -184,16 +291,23 @@ def _ensure_target_table(
                 f"列名「{column.name}」含不支持字符（P1 只支持字母/数字/下划线）",
                 rule="column_unsupported",
             )
+    type_of = _mysql_type if adapter == "mysql" else _sqlite_type
     cols = ", ".join(
-        f"{_quote(c.name)} {_sqlite_type(c.data_type)}" for c in meta.columns)
-    conn.execute(f"CREATE TABLE IF NOT EXISTS {_quote(table)} ({cols})")
+        f"{quote(c.name)} {type_of(c.data_type)}" for c in meta.columns)
+    if adapter == "sqlite":
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {quote(table)} ({cols})")
+    else:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS {quote(table)} ({cols})"
+                " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
     return True
 
 
 # ---------------------------------------------------------------- 预演 / 提交
 def preview(
     *,
-    db_path: str,
+    target: dict[str, Any],
     engine: Any,
     config: dict[str, Any],
     state: dict[str, Any] | None,
@@ -201,6 +315,7 @@ def preview(
     sample_limit: int = 20,
 ) -> dict[str, Any]:
     """预演：只读源表 + 读目标表现状，不修改任何数据。"""
+    _target_adapter(target)  # 提前校验目标适配器，别等提交才发现不支持
     mode = config["mode"]
     watermark = config.get("watermark") or ""
     after = ""
@@ -216,11 +331,18 @@ def preview(
         for row in rows[:sample_limit]
     ]
 
-    target_exists = target_table_exists(db_path, config["target_table"])
-    target_rows = 0
-    if target_exists:
-        with _connect(db_path) as conn:
-            target_rows = _count_rows(conn, config["target_table"])
+    target_table = config["target_table"]
+    target_exists = target_table_exists(target, target_table)
+    target_rows = _count_rows(target, target_table) if target_exists else 0
+
+    # 增量任务还没有水位（first run）时，如果目标表里已经有数据，
+    # 直接追加会造成重复行；如实拒绝，要求先全量初始化或清空目标表。
+    if mode == "incremental" and not after and target_exists and target_rows > 0:
+        raise SyncError(
+            f"增量任务还没有水位，且目标表「{target_table}」已有 {target_rows} 行；"
+            "请先用全量模式初始化一次，或先清空目标表再运行增量",
+            rule="incremental_needs_init",
+        )
 
     watermark_after = after
     if mode == "incremental" and watermark and rows:
@@ -236,18 +358,20 @@ def preview(
         "rows": len(rows),
         "columns": columns,
         "sample": sample,
-        "target_table": config["target_table"],
+        "target_table": target_table,
         "target_exists": target_exists,
         "target_rows": target_rows,
         "watermark_before": after,
         "watermark_after": watermark_after,
         "mode": mode,
+        "target_adapter": _target_adapter(target),
+        "target_label": str(target.get("label") or target.get("source_id") or ""),
     }
 
 
 def commit(
     *,
-    db_path: str,
+    target: dict[str, Any],
     engine: Any,
     config: dict[str, Any],
     state: dict[str, Any] | None,
@@ -255,7 +379,8 @@ def commit(
     expected_rows: int,
     expected_watermark_after: str,
 ) -> dict[str, Any]:
-    """提交：重新读源表核对后，在目标 SQLite 单事务里写入。"""
+    """提交：重新读源表核对后，在目标库单事务里写入。"""
+    adapter = _target_adapter(target)
     mode = config["mode"]
     after = ""
     if mode == "incremental" and state:
@@ -285,39 +410,75 @@ def commit(
                 "源表水位在预演后发生变化；请重新预演", rule="source_changed")
 
     target_table = config["target_table"]
-    conn = _connect(db_path)
-    created_table = False
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        created_table = _ensure_target_table(conn, target_table, meta)
-        if mode == "full":
-            conn.execute(f"DELETE FROM {_quote(target_table)}")
-        if rows:
-            placeholders = ", ".join("?" for _ in columns)
-            col_sql = ", ".join(_quote(c) for c in columns)
-            conn.executemany(
-                f"INSERT INTO {_quote(target_table)} ({col_sql})"
-                f" VALUES ({placeholders})",
-                [tuple(row) for row in rows],
+    # 增量首跑（水位为空）且目标表已有数据：拒绝，避免追加出重复行。
+    if mode == "incremental" and not after and target_table_exists(target, target_table):
+        existing = _count_rows(target, target_table)
+        if existing > 0:
+            raise SyncError(
+                f"增量任务还没有水位，且目标表「{target_table}」已有 {existing} 行；"
+                "请先用全量模式初始化一次，或先清空目标表再运行增量",
+                rule="incremental_needs_init",
             )
-        conn.execute("COMMIT")
-    except sqlite3.Error as exc:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.Error:
-            pass
-        raise SyncError(f"写入目标库失败：{exc}", rule="sqlite_error") from exc
-    except SyncError:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.Error:
-            pass
-        raise
-    finally:
-        conn.close()
+    quote = lambda ident: _quote_for(adapter, ident)  # noqa: E731
+    created_table = False
 
-    with _connect(db_path) as conn2:
-        target_rows = _count_rows(conn2, target_table)
+    if adapter == "sqlite":
+        conn = _connect(str(target.get("path") or ""))
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            created_table = _ensure_target_table(conn, target, target_table, meta)
+            if mode == "full":
+                conn.execute(f"DELETE FROM {quote(target_table)}")
+            if rows:
+                placeholders = ", ".join("?" for _ in columns)
+                col_sql = ", ".join(quote(c) for c in columns)
+                conn.executemany(
+                    f"INSERT INTO {quote(target_table)} ({col_sql})"
+                    f" VALUES ({placeholders})",
+                    [tuple(row) for row in rows],
+                )
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise SyncError(f"写入目标库失败：{exc}", rule="sqlite_error") from exc
+        except SyncError:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+    else:
+        conn = _mysql_connect(target)
+        try:
+            conn.begin()
+            created_table = _ensure_target_table(conn, target, target_table, meta)
+            with conn.cursor() as cur:
+                if mode == "full":
+                    cur.execute(f"DELETE FROM {quote(target_table)}")
+                if rows:
+                    placeholders = ", ".join("%s" for _ in columns)
+                    col_sql = ", ".join(quote(c) for c in columns)
+                    cur.executemany(
+                        f"INSERT INTO {quote(target_table)} ({col_sql})"
+                        f" VALUES ({placeholders})",
+                        [tuple(row) for row in rows],
+                    )
+            conn.commit()
+        except SyncError:
+            conn.rollback()
+            raise
+        except Exception as exc:  # noqa: BLE001 - pymysql 错误统一成业务结果
+            conn.rollback()
+            raise SyncError(f"写入 MySQL 目标失败：{exc}", rule="mysql_error") from exc
+        finally:
+            conn.close()
+
+    target_rows = _count_rows(target, target_table)
     return {
         "rows": len(rows),
         "target_rows": target_rows,
@@ -325,4 +486,5 @@ def commit(
         "target_table": target_table,
         "created_table": created_table,
         "mode": mode,
+        "target_adapter": adapter,
     }

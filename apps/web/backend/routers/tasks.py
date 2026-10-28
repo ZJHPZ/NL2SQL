@@ -464,16 +464,27 @@ def _project_meta(hub: ProjectHub, project_id: str) -> dict[str, Any]:
     return meta
 
 
+_WRITE_MYSQL_SYSTEM_DBS = {"mysql", "information_schema", "performance_schema", "sys"}
+
+
 def _write_target(hub: ProjectHub, project_id: str, source_id: str,
-                  store: TaskStore) -> tuple[str, dict[str, Any]]:
-    """解析受控写的目标库路径；任何一项不满足都如实拒绝。"""
+                  store: TaskStore,
+                  *, allow_mysql: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+    """解析受控写 / 同步的目标连接；任何一项不满足都如实拒绝。
+
+    返回 `(target, settings)`：SQLite 目标给 `{"adapter": "sqlite", "path": ...}`，
+    MySQL 目标给 `{"adapter": "mysql", "host"/"port"/"user"/"password"/"database"}`。
+    受控写的两个端点（write dry-run/commit）调用时不开 `allow_mysql`，
+    只有同步执行器允许把 MySQL 实验库当作搬运目标。
+    """
     meta = _project_meta(hub, project_id)
     settings = meta.get("data_write") or {}
     if not settings.get("enabled"):
         raise HTTPException(
             status_code=403,
             detail="项目未开启受控写。请到项目设置里显式开启，并绑定一个 "
-                   "SQLite 测试库；问答与只读任务永远不写业务数据",
+                   "SQLite 测试库（同步任务也可以绑定 MySQL 实验库）；"
+                   "问答与只读任务永远不写业务数据",
         )
     target_id = str(settings.get("source_id") or "")
     if not target_id:
@@ -492,22 +503,53 @@ def _write_target(hub: ProjectHub, project_id: str, source_id: str,
     if source is None:
         raise HTTPException(status_code=400,
                             detail=f"写入数据源不存在：{target_id}")
-    if str(source.get("adapter") or "") != "sqlite":
-        raise HTTPException(
-            status_code=400,
-            detail="P1 受控写只支持 SQLite 测试库；MySQL / PostgreSQL / JDBC "
-                   "的写事务与回滚语义尚未接入",
-        )
-    path = str(source.get("path") or "")
-    if not path or not os.path.isfile(path):
-        raise HTTPException(status_code=400,
-                            detail=f"写入数据源文件不存在：{path or '（空）'}")
-    if os.path.abspath(path) == os.path.abspath(str(store.path)):
-        raise HTTPException(
-            status_code=400,
-            detail="写入目标不能是任务库（tasks.db）本身",
-        )
-    return path, settings
+    adapter = str(source.get("adapter") or "")
+    label = str(source.get("label") or target_id)
+    if adapter == "sqlite":
+        path = str(source.get("path") or "")
+        if not path or not os.path.isfile(path):
+            raise HTTPException(status_code=400,
+                                detail=f"写入数据源文件不存在：{path or '（空）'}")
+        if os.path.abspath(path) == os.path.abspath(str(store.path)):
+            raise HTTPException(
+                status_code=400,
+                detail="写入目标不能是任务库（tasks.db）本身",
+            )
+        return {"adapter": "sqlite", "path": path,
+                "source_id": target_id, "label": label}, settings
+    if allow_mysql and adapter == "mysql":
+        database = str(source.get("database") or "").strip()
+        host = str(source.get("host") or "").strip()
+        if not host or not database:
+            raise HTTPException(
+                status_code=400,
+                detail=f"MySQL 写入目标缺少 host/database：{target_id}",
+            )
+        if database.lower() in _WRITE_MYSQL_SYSTEM_DBS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不能把 MySQL 系统库 {database} 当作同步目标",
+            )
+        try:
+            secrets = hub.store.get_secrets(project_id) or {}
+        except Exception:  # noqa: BLE001 - secrets 读不到就按空口令尝试
+            secrets = {}
+        password = str((secrets.get(target_id) or {}).get("password") or "")
+        return {
+            "adapter": "mysql",
+            "host": host,
+            "port": int(source.get("port") or 3306),
+            "user": str(source.get("user") or ""),
+            "password": password,
+            "database": database,
+            "source_id": target_id,
+            "label": label,
+        }, settings
+    raise HTTPException(
+        status_code=400,
+        detail="P1 受控写只支持 SQLite 测试库；同步任务还可以写 MySQL 实验库。"
+               "PostgreSQL / JDBC 的写事务与回滚语义尚未接入",
+    )
 
 
 @router.post("/projects/{project_id}/tasks/{task_id}/write/dry-run")
@@ -522,8 +564,9 @@ def write_dry_run(project_id: str, task_id: str, req: WriteDryRunRequest,
             status_code=400,
             detail="只有「写入」任务可以预演写入；SQL 任务请直接运行（只读）",
         )
-    db_path, settings = _write_target(
+    target, settings = _write_target(
         hub, project_id, req.source_id or "", store)
+    db_path = str(target["path"])
     max_affected = int(settings.get("max_affected") or 100)
     source_id = str(settings.get("source_id") or "")
     guard = WriteGuard(max_affected=max_affected)
@@ -604,8 +647,9 @@ def write_commit(project_id: str, task_id: str, req: WriteCommitRequest,
             status_code=409,
             detail="任务在预演后又被修改过；为避免按旧预演提交，请重新预演",
         )
-    db_path, settings = _write_target(
+    target, settings = _write_target(
         hub, project_id, dry["source_id"], store)
+    db_path = str(target["path"])
     max_affected = int(settings.get("max_affected") or 100)
     source_id = str(settings.get("source_id") or "")
     guard = WriteGuard(max_affected=max_affected)
@@ -696,12 +740,12 @@ def sync_preview(project_id: str, task_id: str,
     store, engine = _store_for(hub, project_id)
     task = _sync_or_400(store, task_id)
     config = _sync_config(task)
-    db_path, settings = _write_target(hub, project_id, "", store)
+    target, settings = _write_target(hub, project_id, "", store, allow_mysql=True)
     max_affected = min(int(settings.get("max_affected") or 100), MAX_SYNC_ROWS)
     state = store.sync_state(task_id)
     try:
         result = sync_runner.preview(
-            db_path=db_path, engine=engine, config=config,
+            target=target, engine=engine, config=config,
             state=state, max_affected=max_affected,
         )
     except sync_runner.SyncError as exc:
@@ -772,7 +816,8 @@ def sync_commit(project_id: str, task_id: str, req: SyncCommitRequest,
         )
     config = _sync_config(task)
     try:
-        db_path, settings = _write_target(hub, project_id, "", store)
+        target, settings = _write_target(
+            hub, project_id, "", store, allow_mysql=True)
     except HTTPException:
         store.delete_sync_preview(req.preview_id)
         raise
@@ -780,7 +825,7 @@ def sync_commit(project_id: str, task_id: str, req: SyncCommitRequest,
     state = store.sync_state(task_id)
     try:
         done = sync_runner.commit(
-            db_path=db_path, engine=engine, config=config, state=state,
+            target=target, engine=engine, config=config, state=state,
             max_affected=max_affected,
             expected_rows=int(preview["rows"]),
             expected_watermark_after=str(preview["watermark_after"] or ""),
