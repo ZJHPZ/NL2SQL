@@ -186,21 +186,24 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
 ## 受控写（P1，2026-10-26）
 
 写入任务不是「SQL 控制台」：只允许单表 INSERT / UPDATE / DELETE，且必须先预演、确认后才落库。
-写权限默认关闭，写目标只能是项目自己绑定的 SQLite 测试库；问答链路、只读 SQL 任务、
-随行智能体全部保持原样。
+写权限默认关闭，写目标只能是项目自己绑定的 SQLite 测试库或 MySQL 实验库；问答链路、
+只读 SQL 任务、随行智能体全部保持原样。
 
 ### 四层防线
 
 1. **守门** `nl2sql/guard/write.py`：单条、≤20000 字符；禁 DDL / TRUNCATE / 多语句 /
    恒真 WHERE 等；INSERT 只认 `INSERT INTO 表 (列) VALUES …`，UPDATE / DELETE 必须带
    WHERE；`sqlite_` 前缀与 blocked_tables 拒绝。保存任务与预演两端都过这道门（双层）。
-2. **两阶段执行** `apps/web/backend/write_runner.py`：`BEGIN IMMEDIATE` 事务里真执行，
+2. **两阶段执行** `apps/web/backend/write_runner.py`：目标在事务里真执行
+   （SQLite 用 `BEGIN IMMEDIATE`，MySQL 用 pymysql 显式事务；MySQL 以
+   `FOUND_ROWS` 统计匹配行数，与 SQLite 的 `changes()` 语义对齐），
    统计影响行数并在回滚前取样 before / after；超过项目 `max_affected` 直接回滚并报
    `affected_limit`；预演结束 ROLLBACK，提交才 COMMIT。
 3. **一次性凭据**：预演凭据存任务库 `write_dry_run`（`wd-*`，5 分钟过期）；提交时校验
    项目 / 任务 / revision / SQL 未变（变过 409 并作废），提交成功即删除；任务库新增
    `write_audit` 只追加审计。
-4. **读写分离**：写执行器用独立 `sqlite3.connect`，绕开只读适配器；项目设置
+4. **读写分离**：写执行器用独立可写连接（SQLite `sqlite3.connect`；MySQL 用
+   项目 secrets 里的独立账号 + pymysql），绕开只读适配器；项目设置
    `[data_write] enabled / source_id / max_affected`（上限 1–1000，默认 100），开启需
    在界面上输入项目名二次确认。
 
@@ -213,12 +216,14 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
   超限用 `.alert-bad` 给出原因与规则代码。
 - 底部面板新增「写入审计」tab（仅写任务）：时间 / 状态 / 操作 / 表 / 行数 / 任务 /
   SQL 或原因；状态 badge 预演 = 赭石、已提交 = 橄榄、拒绝 / 失败 = 朱红。
-- 项目详情新增「受控写」section：默认关闭；开启要输入项目名，写目标只列 SQLite 数据源，
-  影响行数上限 1–1000，保存后顶部显示「已开启」朱红 badge 与绑定值。
+- 项目详情新增「受控写」section：默认关闭；开启要输入项目名，写目标列出项目里的
+  SQLite / MySQL 数据源，影响行数上限 1–1000，保存后顶部显示「已开启」朱红 badge
+  与绑定值。
 
 ### 边界
 
-- 不含 DDL / 事务脚本 / 存储过程；SQLite 以外的引擎暂不支持写入（接口 400 明确说明）。
+- 不含 DDL / 事务脚本 / 存储过程；PostgreSQL / JDBC 暂不支持写入（接口 400 明确说明）；
+  MySQL 实验库已接入（P1.2），系统库与任务库直接拒绝。
 - PySpark 仍只保存不执行；写任务不能点「运行」，必须预演。
 - 审计表在项目任务库内，随项目一起删除；不含业务库审计。
 
@@ -232,6 +237,23 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
   affected_limit；axe 五态 0 违规、运行时 0。全量 E2E（product / ide / dirty /
   completion / lint）保持全绿；tsc 0、build 通过（主包 gzip 113.22kB、编辑器 chunk
   gzip 134.25kB、sql-formatter chunk gzip 76.33kB）。
+
+### P1.2：MySQL 写目标（2026-10-28）
+
+写目标从「SQLite 路径」升级为 target 描述：`{"adapter":"sqlite","path"}` 或
+`{"adapter":"mysql","host","port","user","password","database"}`（口令取自项目
+secrets，永不回传；系统库 / 任务库拒绝）。`write_runner` 按目标分派事务、标识符
+引用与取样查询：SQLite `BEGIN IMMEDIATE` + `?`；MySQL pymysql 显式事务 + `%s` +
+`DictCursor` + `FOUND_ROWS`（影响行数按匹配行计，上限更保守）。预演同样「真执行 →
+取样 → ROLLBACK」，提交才 COMMIT；`affected_limit`、一次性凭据、revision 复核、
+审计全部复用原流程。前端只改文案与写目标下拉（列出 SQLite / MySQL 源），
+交互不变。
+
+**验证**：`tests/test_write_mysql.py`（需要 `NL2SQL_TEST_MYSQL_*` 环境变量、缺省
+SKIP、不提交密码）覆盖 MySQL 预演不落库、前后样本、提交落库、一次性凭据、
+预演后改任务 409、`affected_limit`、系统库拒绝与审计；`_tmp/e2e/write_probe.mjs`
+在同一探针上以 MySQL 实验库为目标全绿（axe 五态 0、验收 DB 中 2 行变 paid）；
+`tests/test_write_guard.py` 与 `tests/test_write_api.py` 保持全 PASS。
 
 ## 原生调度编排（P1，2026-10-28）
 
@@ -292,8 +314,8 @@ tick 触发）；`_tmp/e2e/workflow_probe.mjs` 覆盖编辑器/依赖切换/保�
 3. 目标库为项目「受控写」绑定的数据源：本地 SQLite 测试库（`BEGIN IMMEDIATE` 事务），
    或 **MySQL 实验库**（pymysql + 项目 secrets 里的独立账号，`CREATE TABLE IF NOT EXISTS`
    + 全量 `DELETE` / 批量 `INSERT` 同一事务；系统库与任务库直接拒绝）。读取可以是
-   SQLite / MySQL / PostgreSQL，读取永远只读。注意：SQL 写入任务（write）仍只支持
-   SQLite——同步是本期唯一放开到 MySQL 的写路径。
+   SQLite / MySQL / PostgreSQL，读取永远只读。受控写（write）与同步共用同一
+   写目标：SQLite 测试库或 MySQL 实验库；PostgreSQL / JDBC 的写事务尚未接入。
    增量首跑（水位为空）时若目标表已有数据，拒绝并提示先全量初始化
    （`incremental_needs_init`），避免把整表追加成重复行。
 

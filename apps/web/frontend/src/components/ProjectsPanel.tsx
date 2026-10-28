@@ -150,7 +150,7 @@ export function ProjectsPanel({
   const [projectBusy, setProjectBusy] = useState(false)
 
   // ------------------------------------------------------------ 受控写设置
-  // 默认关闭；开启时写目标只能是项目里已绑定的 SQLite 数据源。
+  // 默认关闭；开启时写目标只能是项目里已绑定的 SQLite 测试库或 MySQL 实验库。
   const [writeEditing, setWriteEditing] = useState(false)
   const [writeEnabled, setWriteEnabled] = useState(false)
   const [writeSourceId, setWriteSourceId] = useState('')
@@ -325,7 +325,7 @@ export function ProjectsPanel({
       return
     }
     if (writeEnabled && !writeSourceId) {
-      setWriteError('开启受控写前请先绑定一个 SQLite 测试库')
+      setWriteError('开启受控写前请先绑定一个 SQLite 测试库或 MySQL 实验库')
       return
     }
     setWriteBusy(true)
@@ -1009,7 +1009,7 @@ export function ProjectsPanel({
                         </select>
                       </label>
                       <label className="field">
-                        <span>写目标（SQLite 测试库）</span>
+                        <span>写目标（SQLite 测试库 / MySQL 实验库）</span>
                         <select
                           value={writeSourceId}
                           disabled={!writeEnabled}
@@ -1017,7 +1017,10 @@ export function ProjectsPanel({
                         >
                           <option value="">（未选择）</option>
                           {sources
-                            .filter((s) => s.adapter === 'sqlite')
+                            .filter(
+                              (s) =>
+                                s.adapter === 'sqlite' || s.adapter === 'mysql',
+                            )
                             .map((s) => (
                               <option key={s.source_id} value={s.source_id}>
                                 {s.label || s.source_id} · {s.source_id}
@@ -1052,7 +1055,7 @@ export function ProjectsPanel({
                       )}
                     </div>
                     <div className="meta" style={{ marginTop: 6 }}>
-                      写目标必须是本项目绑定的 SQLite 数据源；开启后仍只能做单表写入，
+                      写目标必须是本项目绑定的 SQLite 测试库或 MySQL 实验库；开启后仍只能做单表写入，
                       DDL / 多语句 / 无 WHERE 的语句会被守门直接拒绝。
                     </div>
                     {writeError && <div className="alert alert-bad">{writeError}</div>}

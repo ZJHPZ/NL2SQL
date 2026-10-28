@@ -93,7 +93,8 @@ export default function SyncEditor({
   return (
     <div className="sync-editor">
       <div className="meta sync-hint">
-        同步任务 = 读源库一张表 → 写到项目写目标（SQLite）。全量会先清空目标表再全搬，
+        同步任务 = 读源库一张表 → 写到项目写目标（SQLite 测试库或 MySQL 实验库）。
+        全量会先清空目标表再全搬，
         增量按水位列只搬新行；保存后点「预演同步」看行数与样本，确认后提交。
       </div>
       {error && <div className="alert alert-bad sync-error">{error}</div>}
@@ -163,7 +164,7 @@ export default function SyncEditor({
       {!dataWrite?.enabled && (
         <div className="alert alert-warn sync-warn">
           项目还没有开启受控写：同步提交会被拒绝。请先在项目详情的「受控写」里开启，
-          并把写目标绑定到本项目的一个 SQLite 数据源。
+          并把写目标绑定到本项目的一个 SQLite 测试库或 MySQL 实验库。
         </div>
       )}
       {dataWrite?.enabled && (
@@ -174,7 +175,8 @@ export default function SyncEditor({
       )}
       {source && source.adapter !== 'sqlite' && (
         <p className="meta sync-target">
-          源是 {source.adapter}：读取走只读适配器，写入只用项目写目标 SQLite。
+          源是 {source.adapter}：读取走只读适配器，写入只用项目绑定的写目标
+          （SQLite 测试库或 MySQL 实验库）。
         </p>
       )}
 

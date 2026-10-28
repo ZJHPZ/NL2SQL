@@ -60,7 +60,7 @@ const KIND_HINT: Record<string, string> = {
   write: '仅单表 INSERT / UPDATE / DELETE，必须带 WHERE；先预演，确认后提交',
   workflow:
     '按步骤依赖顺序执行只读 SQL 任务；支持手动触发与 cron 调度，失败即停',
-  sync: '把源库一张表搬到项目写目标（SQLite）：全量或按水位列增量；先预演，确认后提交',
+  sync: '把源库一张表搬到项目写目标（SQLite 测试库或 MySQL 实验库）：全量或按水位列增量；先预演，确认后提交',
 }
 
 /** 实例状态 → 中文 / 徽标 */
@@ -2372,7 +2372,8 @@ export function TasksPanel({
                     {bottom === 'audit' && detail.task.kind !== 'sync' && (
                       <div className="bottom-audit">
                         <div className="meta bottom-history-hint">
-                          预演 / 提交 / 被拦都会留审计；写入只作用于项目绑定的 SQLite 测试库。
+                          预演 / 提交 / 被拦都会留审计；写入只作用于项目绑定的 SQLite
+                          测试库或 MySQL 实验库。
                           <button
                             className="linkbtn"
                             disabled={auditBusy}
@@ -2434,8 +2435,8 @@ export function TasksPanel({
                     {bottom === 'audit' && detail.task.kind === 'sync' && (
                       <div className="bottom-audit">
                         <div className="meta bottom-history-hint">
-                          预演 / 提交 / 失败都会留审计；同步只把源表数据写入项目绑定的 SQLite
-                          写库。
+                          预演 / 提交 / 失败都会留审计；同步只把源表数据写入项目绑定的
+                          写目标（SQLite 测试库或 MySQL 实验库）。
                           <button
                             className="linkbtn"
                             disabled={syncInfoBusy}

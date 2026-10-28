@@ -137,13 +137,13 @@ def test_runner() -> None:
         )
         check("guard allows update", update.allowed, update.reason)
 
-        preview = write_runner.dry_run(str(db), update, max_affected=10)
+        preview = write_runner.dry_run({"adapter": "sqlite", "path": str(db)}, update, max_affected=10)
         check("dry rows", preview["rows"] == 1, str(preview["rows"]))
         check("dry before sample", len(preview["before"]) == 1)
         check("dry after sample amount", preview["after"][0]["amount"] == 99.0)
         check("dry rolled back", _amounts(db)["o1"] == 10.0)
 
-        done = write_runner.commit(str(db), update, max_affected=10)
+        done = write_runner.commit({"adapter": "sqlite", "path": str(db)}, update, max_affected=10)
         check("commit rows", done["rows"] == 1, str(done["rows"]))
         check("commit persisted", _amounts(db)["o1"] == 99.0)
 
@@ -153,7 +153,7 @@ def test_runner() -> None:
             "UPDATE fact_order SET status = 'paid' WHERE amount > 0"
         )
         try:
-            write_runner.dry_run(str(db), over, max_affected=2)
+            write_runner.dry_run({"adapter": "sqlite", "path": str(db)}, over, max_affected=2)
             check("limit rollback", False, "expected WriteRunError")
         except write_runner.WriteRunError as exc:
             check("limit rule", exc.rule == "affected_limit", exc.rule)
@@ -163,14 +163,14 @@ def test_runner() -> None:
         insert = guard.check(
             "INSERT INTO fact_order (order_id, amount) VALUES ('o9', 1.0)"
         )
-        ins = write_runner.dry_run(str(db), insert, max_affected=10)
+        ins = write_runner.dry_run({"adapter": "sqlite", "path": str(db)}, insert, max_affected=10)
         check("insert dry rows", ins["rows"] == 1, str(ins["rows"]))
         check("insert not persisted", "o9" not in _amounts(db))
-        write_runner.commit(str(db), insert, max_affected=10)
+        write_runner.commit({"adapter": "sqlite", "path": str(db)}, insert, max_affected=10)
         check("insert committed", _amounts(db)["o9"] == 1.0)
 
         delete = guard.check("DELETE FROM fact_order WHERE order_id = 'o9'")
-        write_runner.commit(str(db), delete, max_affected=10)
+        write_runner.commit({"adapter": "sqlite", "path": str(db)}, delete, max_affected=10)
         check("delete committed", "o9" not in _amounts(db))
 
         # 任务库不该被写：路由器负责拦截，这里确认执行器只认传入路径

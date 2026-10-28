@@ -474,8 +474,9 @@ def _write_target(hub: ProjectHub, project_id: str, source_id: str,
 
     返回 `(target, settings)`：SQLite 目标给 `{"adapter": "sqlite", "path": ...}`，
     MySQL 目标给 `{"adapter": "mysql", "host"/"port"/"user"/"password"/"database"}`。
-    受控写的两个端点（write dry-run/commit）调用时不开 `allow_mysql`，
-    只有同步执行器允许把 MySQL 实验库当作搬运目标。
+    受控写（write dry-run/commit）与同步（sync preview/commit）都会传
+    `allow_mysql=True`：目标是 SQLite 测试库或 MySQL 实验库；MySQL 系统库与
+    任务库一律拒绝。PostgreSQL / JDBC 尚未接入。
     """
     meta = _project_meta(hub, project_id)
     settings = meta.get("data_write") or {}
@@ -483,7 +484,7 @@ def _write_target(hub: ProjectHub, project_id: str, source_id: str,
         raise HTTPException(
             status_code=403,
             detail="项目未开启受控写。请到项目设置里显式开启，并绑定一个 "
-                   "SQLite 测试库（同步任务也可以绑定 MySQL 实验库）；"
+                   "可写的数据源（SQLite 测试库或 MySQL 实验库）；"
                    "问答与只读任务永远不写业务数据",
         )
     target_id = str(settings.get("source_id") or "")
@@ -528,7 +529,7 @@ def _write_target(hub: ProjectHub, project_id: str, source_id: str,
         if database.lower() in _WRITE_MYSQL_SYSTEM_DBS:
             raise HTTPException(
                 status_code=400,
-                detail=f"不能把 MySQL 系统库 {database} 当作同步目标",
+                detail=f"不能把 MySQL 系统库 {database} 当作写入目标",
             )
         try:
             secrets = hub.store.get_secrets(project_id) or {}
@@ -547,7 +548,7 @@ def _write_target(hub: ProjectHub, project_id: str, source_id: str,
         }, settings
     raise HTTPException(
         status_code=400,
-        detail="P1 受控写只支持 SQLite 测试库；同步任务还可以写 MySQL 实验库。"
+        detail="受控写目标只支持 SQLite 测试库或 MySQL 实验库。"
                "PostgreSQL / JDBC 的写事务与回滚语义尚未接入",
     )
 
@@ -565,8 +566,7 @@ def write_dry_run(project_id: str, task_id: str, req: WriteDryRunRequest,
             detail="只有「写入」任务可以预演写入；SQL 任务请直接运行（只读）",
         )
     target, settings = _write_target(
-        hub, project_id, req.source_id or "", store)
-    db_path = str(target["path"])
+        hub, project_id, req.source_id or "", store, allow_mysql=True)
     max_affected = int(settings.get("max_affected") or 100)
     source_id = str(settings.get("source_id") or "")
     guard = WriteGuard(max_affected=max_affected)
@@ -583,7 +583,7 @@ def write_dry_run(project_id: str, task_id: str, req: WriteDryRunRequest,
         }
     try:
         preview = write_runner.dry_run(
-            db_path, check, max_affected=max_affected)
+            target, check, max_affected=max_affected)
     except write_runner.WriteRunError as exc:
         audit_id = store.record_write_audit(
             task=task, source_id=source_id, check=check,
@@ -648,8 +648,7 @@ def write_commit(project_id: str, task_id: str, req: WriteCommitRequest,
             detail="任务在预演后又被修改过；为避免按旧预演提交，请重新预演",
         )
     target, settings = _write_target(
-        hub, project_id, dry["source_id"], store)
-    db_path = str(target["path"])
+        hub, project_id, dry["source_id"], store, allow_mysql=True)
     max_affected = int(settings.get("max_affected") or 100)
     source_id = str(settings.get("source_id") or "")
     guard = WriteGuard(max_affected=max_affected)
@@ -664,7 +663,7 @@ def write_commit(project_id: str, task_id: str, req: WriteCommitRequest,
                 "rule": check.rule, "audit_id": audit_id}
     try:
         done = write_runner.commit(
-            db_path, check, max_affected=max_affected)
+            target, check, max_affected=max_affected)
     except write_runner.WriteRunError as exc:
         store.delete_dry_run(req.dry_run_id)
         audit_id = store.record_write_audit(
