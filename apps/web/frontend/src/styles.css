@@ -6398,3 +6398,326 @@ table.grid td.mono {
     font-size: 11px;
   }
 }
+
+
+/* ---------------------------------------------------------------- v14：调度编排（P1）
+ * 工作流沿用纸面墨线：步骤卡用左侧 2px 墨线表达顺序，依赖 chip 选中的用橄榄底。
+ */
+.kind-dot.kind-workflow {
+  background: var(--ochre);
+}
+
+.ide-stats {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.editor-cols-wf {
+  display: block;
+  overflow: auto;
+}
+
+/* 步骤编辑器 */
+.wf-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 22px;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background: var(--paper);
+}
+
+.wf-empty {
+  margin: 0;
+  max-width: 640px;
+  line-height: 1.7;
+}
+
+.wf-empty-first {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 0;
+}
+
+.wf-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-step {
+  border: 1px solid var(--rule-mid);
+  border-left: 2px solid var(--ink);
+  background: rgba(240, 233, 216, 0.55);
+  padding: 10px 12px;
+}
+
+.wf-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-step-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  padding: 2px 6px;
+  font-size: 11px;
+  background: var(--paper-3);
+  color: var(--ink-2);
+  letter-spacing: 0.04em;
+}
+
+.wf-step-task {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-mid);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.wf-step-task:focus-visible,
+.wf-step-task:focus {
+  outline: none;
+  border-color: var(--olive);
+  box-shadow: 0 0 0 1px var(--olive);
+}
+
+.wf-step-tag {
+  font-size: 11px;
+  color: var(--vermilion);
+  white-space: nowrap;
+}
+
+.wf-step-remove {
+  color: var(--ink-3);
+}
+
+.wf-step-remove:hover {
+  color: var(--vermilion);
+}
+
+.wf-step-deps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.wf-step-deps-label {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  letter-spacing: 0.08em;
+}
+
+.wf-deps {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.wf-dep-chip {
+  border: 1px solid var(--rule-mid);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.wf-dep-chip.on {
+  background: var(--olive);
+  border-color: var(--olive);
+  color: var(--paper);
+}
+
+.wf-dep-chip:focus-visible {
+  outline: 2px solid var(--olive);
+  outline-offset: 1px;
+}
+
+.wf-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+}
+
+/* 运行实例 */
+.wf-run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.wf-run {
+  border-bottom: 1px solid var(--rule);
+}
+
+.wf-run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wf-run-row:hover {
+  background: var(--paper-2);
+}
+
+.wf-run-row:focus-visible {
+  outline: 2px solid var(--olive);
+  outline-offset: -2px;
+}
+
+.wf-run-trigger {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.wf-run-error {
+  color: var(--vermilion);
+  padding: 0 4px 6px;
+}
+
+.wf-run-steps {
+  margin: 0 0 10px 16px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--rule-strong);
+  background: var(--paper-2);
+}
+
+.wf-run-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dotted var(--rule);
+}
+
+.wf-run-step:last-of-type {
+  border-bottom: 0;
+}
+
+.wf-run-step-key {
+  min-width: 30px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.wf-run-step-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-run-actions {
+  margin-top: 8px;
+}
+
+/* 调度 tab */
+.wf-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wf-schedule-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.wf-schedule-form .field {
+  width: 300px;
+}
+
+.wf-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--ink-2);
+  padding-bottom: 8px;
+}
+
+.wf-check input {
+  accent-color: var(--olive);
+}
+
+.wf-schedule-msg {
+  color: var(--olive);
+}
+
+.wf-schedule-meta {
+  color: var(--ink-3);
+}
+
+@media (max-width: 900px) {
+  .ide-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .wf-editor {
+    padding: 14px;
+  }
+
+  .wf-step-head {
+    flex-wrap: wrap;
+  }
+
+  .wf-step-task {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .wf-schedule-form {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .wf-schedule-form .field {
+    width: auto;
+  }
+
+  .wf-run-row {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .ide-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .wf-step {
+    padding: 8px 10px;
+  }
+}

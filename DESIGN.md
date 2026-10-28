@@ -232,3 +232,38 @@ dark containers 仅剩墨底按钮与 skip-link 两处（有意）；所有交�
   affected_limit；axe 五态 0 违规、运行时 0。全量 E2E（product / ide / dirty /
   completion / lint）保持全绿；tsc 0、build 通过（主包 gzip 113.22kB、编辑器 chunk
   gzip 134.25kB、sql-formatter chunk gzip 76.33kB）。
+
+## 原生调度编排（P1，2026-10-28）
+
+工作流是「任务」的第四种类型（`kind='workflow'`）。正文仍是任务表里的 `sql`
+字段，但语义换成一段 JSON：`{"steps":[{"key","task_id","depends_on"}]}`。
+服务端把「步骤」当唯一事实：保存时校验结构、键唯一、依赖存在、无环，
+最多 20 步；执行时按拓扑排序串行跑，失败即停，且只允许引用本项目里的只读
+SQL 任务（write / PySpark / 另一个工作流都不能进步骤）。
+
+**模型与存储**：项目自己的 `state/tasks.db` 里新增三张表——
+`workflow_schedule`（cron / enabled / next_run_at / last_run_at）、
+`workflow_run`（run_id / trigger / status / 起止时间 / error）、
+`workflow_run_step`（每步 task_id / status / rows / error）。实例与调度跟随
+项目库，不引入外部调度器或消息队列。
+
+**触发**：手动（编辑器上方「运行工作流」）、重跑（实例展开里的「重跑这次
+实例」，trigger=rerun）、cron（后台 `WorkflowScheduler` 线程每 15s 扫
+`next_run_at <= now` 的启用调度，先推进下次再触发）。同一工作流用进程内
+集合 + 库里的 running 双去重，同一时间只跑一个实例。cron 用 APScheduler 的
+`CronTrigger.from_crontab` 校验与算下次时间（5 段、本地时区），只当解析器，
+不用它的调度器/存储。
+
+**界面**（暖纸墨线不变）：新建任务类型里加「工作流（调度编排，先加步骤）」；
+编辑器换成步骤列表——每行是「步骤键 + 任务下拉 + 依赖 chip」，依赖用 chip
+切换，正文由组件序列化，不用手写 JSON；底栏提示「运行实例 / 调度」入口。
+底部面板为工作流改成「运行实例 / 调度 / 任务信息」：运行实例列表带状态
+徽章、触发方式、时间、成功步数，点行展开每步明细；调度页填 cron、勾启用、
+保存后显示下次/上次触发。概览统计变为 6 格（多了工作流计数）。
+
+**边界**：这一期只编排「只读 SQL 任务」，不包含同步/Shell/PySpark 执行器，
+也不做并行、补数区间、DAG 画布；写任务与工作流不能互相嵌套。
+
+**验证**：`tests/test_workflow.py`（定义校验、手动/重跑、调度、去重、假时钟
+tick 触发）；`_tmp/e2e/workflow_probe.mjs` 覆盖编辑器/依赖切换/保存/cron/手动
+运行/实例步骤明细，axe 三态 0 违规；全量 E2E 与既有任务流程保持 0 冲突。

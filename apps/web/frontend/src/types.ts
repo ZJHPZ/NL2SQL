@@ -353,7 +353,7 @@ export interface TaskSummary {
   description: string
   /** 所属文件夹路径（如 ods/原始层），空串 = 根目录 */
   folder: string
-  /** "sql" | "pyspark" | "write"；PySpark 任务只能保存/版本，暂不支持运行 */
+  /** "sql" | "pyspark" | "write" | "workflow"；PySpark 任务只能保存/版本，暂不支持运行 */
   kind: string
   status: string
   /** 前若干字符，列表里做一行预览 */
@@ -528,6 +528,87 @@ export interface WriteAuditEntry {
 export interface WriteAuditResponse {
   project_id: string
   audit: WriteAuditEntry[]
+}
+
+// ---------------------------------------------------------------- 调度编排（P1）
+/** 工作流里的一个步骤：引用一个只读 SQL 任务，按 depends_on 决定先后 */
+export interface WorkflowStep {
+  /** 本工作流内唯一，如 s1 / s2；只用于依赖引用 */
+  key: string
+  /** 被引用的任务 ID（必须是本项目的只读 SQL 任务） */
+  task_id: string
+  /** 依赖的前置步骤 key；空数组 = 可直接开始 */
+  depends_on: string[]
+}
+
+/** GET/PUT .../schedule：工作流的 cron 调度配置 */
+export interface WorkflowSchedule {
+  task_id: string
+  /** 5 段 cron（分 时 日 月 周），本地时区 */
+  cron: string
+  enabled: boolean
+  /** 下一次自动触发时间（ISO 字符串，空 = 未排期） */
+  next_run_at: string
+  last_run_at: string
+  /** 当前是否有实例在跑 */
+  running: boolean
+  running_run_id: string
+}
+
+/** 实例里的一个步骤 */
+export interface WorkflowRunStep {
+  run_id: string
+  step_key: string
+  task_id: string
+  task_name: string
+  depends_on: string[]
+  /** pending | running | success | failed | skipped */
+  status: string
+  rows: number
+  error: string
+  started_at: string
+  finished_at: string
+}
+
+/** 一次工作流运行实例 */
+export interface WorkflowRun {
+  run_id: string
+  task_id: string
+  project_id: string
+  /** manual | cron | rerun */
+  trigger: string
+  /** running | success | failed */
+  status: string
+  started_at: string
+  finished_at: string
+  error: string
+  total_steps: number
+  succeeded_steps: number
+  failed_steps: number
+  steps?: WorkflowRunStep[]
+}
+
+export interface WorkflowRunsResponse {
+  task_id: string
+  running: boolean
+  running_run_id: string
+  runs: WorkflowRun[]
+}
+
+export interface WorkflowRunDetailResponse {
+  task_id: string
+  running: boolean
+  running_run_id: string
+  runs: WorkflowRun[]
+  run: WorkflowRun
+}
+
+/** POST .../workflow/run 与 .../runs/{run_id}/rerun 的返回 */
+export interface WorkflowRunnerResponse {
+  status: string
+  run_id: string
+  task_id: string
+  task: TaskSummary
 }
 
 // ---------------------------------------------------------------- 插件与工具管理

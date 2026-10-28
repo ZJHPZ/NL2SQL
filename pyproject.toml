@@ -27,8 +27,9 @@ mysql = ["pymysql>=1.1"]
 postgres = ["psycopg[binary]>=3.1"]
 # 编排引擎
 agent = ["langgraph>=0.2"]
-# 本地 Web 后端
-web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+# 本地 Web 后端。APScheduler 只用来解析/校验 cron 与算下次触发时间；
+# 调度线程本身是几十行的 stdlib threading，不引入完整的调度框架。
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "apscheduler>=3.10"]
 # 开发工具
 dev = ["pytest>=8.0", "pandas>=2.0"]
 

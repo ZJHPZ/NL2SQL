@@ -11,22 +11,22 @@
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
 from nl2sql.contracts.pipeline import QueryOutcome
-from nl2sql.errors import NL2SQLError, QueryTimeoutError
+from nl2sql.errors import NL2SQLError, TaskError
 from nl2sql.guard.write import WriteGuard
 from nl2sql.tasks import (
     DEFAULT_TASK_FOLDERS,
     TASK_KIND_SQL,
+    TASK_KIND_WORKFLOW,
     TASK_KIND_WRITE,
     TaskStore,
 )
 
-from .. import write_runner
+from .. import workflow_runner, write_runner
 from ..projects import DEFAULT_PROJECT_ID, ProjectHub
 from ..schemas import (
     TaskCreateRequest,
@@ -35,10 +35,14 @@ from ..schemas import (
     TaskMoveRequest,
     TaskRunRequest,
     TaskUpdateRequest,
+    WorkflowScheduleUpdate,
     WriteCommitRequest,
     WriteDryRunRequest,
 )
 from ..serializers import outcome_to_response
+from ..task_exec import execute_readonly as _execute_readonly
+from ..task_exec import run_sql_task
+from ..workflow_schedule import next_fire_text, validate_cron
 
 router = APIRouter(prefix="/api", tags=["tasks"])
 
@@ -278,6 +282,12 @@ def run_task(project_id: str, task_id: str, req: TaskRunRequest,
             detail="写入任务不能直接运行：请先「预演写入」查看影响行数与前后对比，"
                    "再显式确认提交（只读执行链路不会执行写语句）",
         )
+    if task.kind == TASK_KIND_WORKFLOW:
+        raise HTTPException(
+            status_code=400,
+            detail="工作流任务请用「运行工作流」触发：会按步骤依赖顺序执行只读 "
+                   "SQL，并记录一次运行实例（cron 到点也会自动触发）",
+        )
     if task.kind != TASK_KIND_SQL:
         # 如实拒绝：PySpark 只有存储与版本，没有执行器。不能假装能跑。
         raise HTTPException(
@@ -316,6 +326,128 @@ def run_task(project_id: str, task_id: str, req: TaskRunRequest,
     payload = outcome_to_response(outcome, planner_mode="task").model_dump()
     payload["task"] = _summary(store.get(task_id) or task)
     return payload
+
+
+# ============================================================== 工作流（调度）
+def _workflow_or_400(store: TaskStore, task_id: str):
+    task = _task_or_404(store, task_id)
+    if task.kind != TASK_KIND_WORKFLOW:
+        raise HTTPException(status_code=400,
+                            detail="只有「工作流」任务有运行实例与调度配置")
+    return task
+
+
+def _start_workflow(store: TaskStore, engine: Any, task,
+                    trigger: str) -> dict[str, Any]:
+    try:
+        run = workflow_runner.start(
+            store=store, task=task,
+            run_sql=lambda sql: run_sql_task(engine, sql),
+            trigger=trigger,
+        )
+    except TaskError as exc:
+        message = str(exc)
+        status = 409 if "实例在运行" in message else 400
+        raise HTTPException(status_code=status, detail=message) from exc
+    return {
+        "status": "running",
+        "run": run,
+        "task": _summary(store.get(task.task_id) or task),
+    }
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/workflow/run")
+def run_workflow(project_id: str, task_id: str,
+                 request: Request) -> dict[str, Any]:
+    """手动触发一次工作流：创建实例后立刻返回，前端轮询实例状态。"""
+    hub = _hub(request)
+    store, engine = _store_for(hub, project_id)
+    task = _workflow_or_400(store, task_id)
+    return _start_workflow(store, engine, task, "manual")
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/runs/{run_id}/rerun")
+def rerun_workflow(project_id: str, task_id: str, run_id: str,
+                   request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, engine = _store_for(hub, project_id)
+    task = _workflow_or_400(store, task_id)
+    existing = store.workflow_run(run_id)
+    if existing is None or existing.get("task_id") != task_id:
+        raise HTTPException(status_code=404, detail=f"运行实例不存在：{run_id}")
+    return _start_workflow(store, engine, task, "rerun")
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}/runs")
+def list_workflow_runs(project_id: str, task_id: str, request: Request,
+                       limit: int = 20) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    _workflow_or_400(store, task_id)
+    running = store.running_workflow_run(task_id)
+    return {
+        "task_id": task_id,
+        "running": running is not None,
+        "running_run_id": running["run_id"] if running else "",
+        "runs": store.list_workflow_runs(
+            task_id, limit=_clamp_limit(limit, 20, 100)),
+    }
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}/runs/{run_id}")
+def get_workflow_run(project_id: str, task_id: str, run_id: str,
+                     request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    task = _workflow_or_400(store, task_id)
+    run = store.workflow_run(run_id)
+    if run is None or run.get("task_id") != task_id:
+        raise HTTPException(status_code=404, detail=f"运行实例不存在：{run_id}")
+    return {"run": run, "task": _summary(store.get(task_id) or task)}
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}/schedule")
+def get_workflow_schedule(project_id: str, task_id: str,
+                          request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    _workflow_or_400(store, task_id)
+    schedule = store.workflow_schedule(task_id) or {}
+    running = store.running_workflow_run(task_id)
+    next_run_at = str(schedule.get("next_run_at") or "")
+    if schedule.get("enabled") and schedule.get("cron") and not next_run_at:
+        try:
+            next_run_at = next_fire_text(str(schedule["cron"]))
+        except ValueError:
+            next_run_at = ""
+    return {
+        "task_id": task_id,
+        "cron": str(schedule.get("cron") or ""),
+        "enabled": bool(schedule.get("enabled")),
+        "next_run_at": next_run_at,
+        "last_run_at": str(schedule.get("last_run_at") or ""),
+        "running": running is not None,
+        "running_run_id": running["run_id"] if running else "",
+    }
+
+
+@router.put("/projects/{project_id}/tasks/{task_id}/schedule")
+def update_workflow_schedule(project_id: str, task_id: str,
+                             req: WorkflowScheduleUpdate,
+                             request: Request) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    _workflow_or_400(store, task_id)
+    try:
+        cron = validate_cron(req.cron)
+        next_run_at = next_fire_text(cron) if req.enabled else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved = store.save_workflow_schedule(
+        task_id, cron=cron, enabled=req.enabled,
+        next_run_at=next_run_at)
+    saved["running"] = store.running_workflow_run(task_id) is not None
+    return saved
 
 
 def _project_meta(hub: ProjectHub, project_id: str) -> dict[str, Any]:
@@ -518,61 +650,3 @@ def list_write_audit(project_id: str, request: Request,
         "project_id": project_id,
         "audit": store.list_write_audit(limit=_clamp_limit(limit, 50, 200)),
     }
-
-
-def _execute_readonly(engine: Any, adapter: Any, cache: Any, guard: Any,
-                      sql: str, *, source_id: str,
-                      question: str = "") -> QueryOutcome:
-    """与 `/api/execute` 同一条只读执行路径（任务库不能绕过防线）。"""
-    max_rows = int(engine.config.safety.max_rows)
-    timeout_s = float(engine.config.safety.timeout_s)
-
-    # SQL 级 LIMIT 取展示上限 + 1：适配器要能读到"多出的那一行"才判断得出截断。
-    decision = guard.check(sql, limit=max_rows + 1)
-    if not decision.allowed:
-        return QueryOutcome(
-            status="blocked", question=question, source_id=source_id,
-            sql=sql, error_code="BLOCKED",
-            message=decision.message or "SQL 被安全策略拒绝",
-            suggestions=[decision.suggestion] if decision.suggestion else [],
-            notes=[f"命中规则：{decision.rule}"],
-        )
-
-    t0 = time.perf_counter()
-    try:
-        result = adapter.execute(decision.sql, limit=max_rows,
-                                 timeout_s=timeout_s)
-    except QueryTimeoutError as exc:
-        return QueryOutcome(
-            status="timeout", question=question, source_id=source_id,
-            sql=decision.sql, error_code="TIMEOUT",
-            message=f"查询超时：{exc}",
-            elapsed_ms=int((time.perf_counter() - t0) * 1000),
-        )
-    except Exception as exc:  # noqa: BLE001 - 执行失败按结果状态返回
-        return QueryOutcome(
-            status="error", question=question, source_id=source_id,
-            sql=decision.sql, error_code=type(exc).__name__,
-            message=f"执行失败：{exc}",
-            suggestions=["检查字段名与语法，或先在数据库客户端验证该查询"],
-            elapsed_ms=int((time.perf_counter() - t0) * 1000),
-        )
-
-    result.source_id = source_id
-    result.sql = decision.sql
-    outcome = QueryOutcome(
-        status="truncated" if result.truncated else (
-            "empty" if result.row_count == 0 else "ok"),
-        question=question, source_id=source_id, sql=decision.sql,
-        result=result,
-        notes=["任务执行（只读 SQL，未经语义层校验，口径未验证）"],
-        suggestions=(["结果被截断，可缩小范围或加 LIMIT"]
-                     if result.truncated else []),
-        elapsed_ms=int((time.perf_counter() - t0) * 1000),
-    )
-    if cache is not None and not result.truncated:
-        try:
-            cache.store_sql(source_id, decision.sql, result)
-        except Exception:  # noqa: BLE001 - 缓存失败不影响结果
-            pass
-    return outcome

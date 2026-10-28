@@ -81,11 +81,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             default_warnings=holder.warnings,
         )
         app.state.project_hub = hub
+        # 工作流 cron 调度线程：只有项目中心可用时才启动。线程内部只扫
+        # 已启用的 workflow_schedule，失败只记日志，不阻断服务。
+        from .workflow_scheduler import WorkflowScheduler
+
+        scheduler = WorkflowScheduler(hub)
+        scheduler.start()
+        app.state.workflow_scheduler = scheduler
     except Exception as e:  # noqa: BLE001 - 项目中心坏掉不阻断演示环境
         holder.warnings.append(f"项目中心不可用: {e}")
 
     yield
 
+    scheduler = getattr(app.state, "workflow_scheduler", None)
+    if scheduler is not None:
+        scheduler.stop()
     hub = getattr(app.state, "project_hub", None)
     if hub is not None:
         hub.close()

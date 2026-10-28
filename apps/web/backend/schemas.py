@@ -283,9 +283,10 @@ class TaskCreateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     source_id: str | None = None
     folder: str = Field(default="", max_length=200, description="任务所在文件夹路径")
-    kind: Literal["sql", "pyspark", "write"] = Field(
+    kind: Literal["sql", "pyspark", "write", "workflow"] = Field(
         default="sql",
-        description="任务类型：sql 只读可运行；pyspark 暂只保存代码；write 受控写",
+        description=("任务类型：sql 只读可运行；pyspark 暂只保存代码；"
+                     "write 受控写；workflow 工作流步骤 DAG"),
     )
 
     _v_name = field_validator("name")(_must_not_be_blank)
@@ -300,8 +301,16 @@ class TaskUpdateRequest(BaseModel):
     enabled: bool | None = None
     source_id: str | None = None
     folder: str | None = Field(default=None, max_length=200)
-    kind: Literal["sql", "pyspark", "write"] | None = None
+    kind: Literal["sql", "pyspark", "write", "workflow"] | None = None
     note: str = Field(default="", max_length=500)
+
+
+class WorkflowScheduleUpdate(BaseModel):
+    """工作流 cron 配置：5 段标准 cron（分 时 日 月 周）。"""
+
+    cron: str = Field(default="", max_length=120,
+                      description="5 段 cron，例如 0 2 * * *")
+    enabled: bool = False
 
 
 class TaskMoveRequest(BaseModel):

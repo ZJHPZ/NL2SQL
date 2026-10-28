@@ -43,15 +43,19 @@ __all__ = [
     "AI_COMMENT_PREFIX",
     "DEFAULT_TASK_FOLDERS",
     "MAX_SQL_CHARS",
+    "MAX_WORKFLOW_STEPS",
     "Task",
     "TaskRevision",
     "TaskStore",
     "default_task_store_path",
+    "parse_workflow",
     "stamp_ai_comment",
+    "topological_order",
     "validate_folder_path",
     "validate_task_content",
     "validate_task_kind",
     "validate_task_sql",
+    "validate_task_workflow",
     "validate_task_write",
 ]
 
@@ -63,11 +67,19 @@ MAX_NOTE_CHARS = 500
 
 # 任务类型。SQL 走只读查询链路；PySpark 只保存代码，执行器尚未接入；
 # 写入任务走受控写链路（单表 + 带条件 + 影响行数上限 + 预演凭据），
-# 与只读问答链路完全分离。
+# 与只读问答链路完全分离；工作流任务只保存步骤 DAG，由调度器/手动触发，
+# 步骤本身仍然只能是只读 SQL 任务。
 TASK_KIND_SQL = "sql"
 TASK_KIND_PYSPARK = "pyspark"
 TASK_KIND_WRITE = "write"
-TASK_KINDS = (TASK_KIND_SQL, TASK_KIND_PYSPARK, TASK_KIND_WRITE)
+TASK_KIND_WORKFLOW = "workflow"
+TASK_KINDS = (TASK_KIND_SQL, TASK_KIND_PYSPARK, TASK_KIND_WRITE,
+              TASK_KIND_WORKFLOW)
+
+# 工作流（一期原生调度）：步骤上限刻意很小——本地单用户场景里，
+# 超过 20 步的「工作流」其实是没人读得懂的脚本，不如拆成多个工作流。
+MAX_WORKFLOW_STEPS = 20
+MAX_WORKFLOW_STEP_KEY = 40
 
 # 项目首次打开任务库时自动建的四层数仓目录（ODS → DWD → DWM → ADS）。
 DEFAULT_TASK_FOLDERS = ("ods", "dwd", "dwm", "ads")
@@ -160,6 +172,52 @@ CREATE TABLE IF NOT EXISTS write_audit (
 );
 
 CREATE INDEX IF NOT EXISTS idx_write_audit ON write_audit(created_at);
+
+-- 工作流调度（一期原生调度）：每个工作流任务一条 cron 配置。
+-- next_run_at 由后台调度线程维护——本地单用户不需要分布式锁；
+-- 重启后按 next_run_at 判断是否补触发（幂等：已有运行中的实例就跳过本次）。
+CREATE TABLE IF NOT EXISTS workflow_schedule (
+    task_id      TEXT PRIMARY KEY,
+    cron         TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 0,
+    next_run_at  TEXT NOT NULL DEFAULT '',
+    last_run_at  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+-- 运行实例：一次触发一条。trigger 记录 manual / cron / rerun。
+CREATE TABLE IF NOT EXISTS workflow_run (
+    run_id       TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL,
+    project_id   TEXT NOT NULL DEFAULT '',
+    trigger      TEXT NOT NULL DEFAULT 'manual',
+    status       TEXT NOT NULL DEFAULT 'running',
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT ''
+);
+
+-- 实例里的步骤：按 step_key 与工作流定义对齐；状态 pending/running/success/
+-- failed/skipped。任务名在触发时快照下来——任务后来改名，历史实例仍可读。
+CREATE TABLE IF NOT EXISTS workflow_run_step (
+    run_id       TEXT NOT NULL,
+    step_key     TEXT NOT NULL,
+    task_id      TEXT NOT NULL DEFAULT '',
+    task_name    TEXT NOT NULL DEFAULT '',
+    depends_on   TEXT NOT NULL DEFAULT '[]',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    rows         INTEGER NOT NULL DEFAULT 0,
+    error        TEXT NOT NULL DEFAULT '',
+    started_at   TEXT NOT NULL DEFAULT '',
+    finished_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (run_id, step_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_run
+    ON workflow_run(task_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_run_step
+    ON workflow_run_step(run_id);
 """
 
 
@@ -214,6 +272,113 @@ def validate_task_write(sql: str) -> str:
     return text
 
 
+_WORKFLOW_STEP_KEY_RE = re.compile(
+    r"^[A-Za-z0-9_-]{1,%d}$" % MAX_WORKFLOW_STEP_KEY)
+
+
+def parse_workflow(content: str) -> list[dict[str, Any]]:
+    """解析工作流正文，返回步骤列表（保持用户书写顺序）。
+
+    正文格式刻意做成显式 DAG（不做拖拽画布）：本地单用户场景下，
+    表单/文字比画布更容易审阅、diff 与版本化：
+
+        {"steps": [
+            {"key": "s1", "task_id": "task-xxxx", "depends_on": []},
+            {"key": "s2", "task_id": "task-yyyy", "depends_on": ["s1"]}
+        ]}
+
+    这里只校验结构（JSON、key、依赖引用、无环），不校验 task_id 是否
+    真实存在、是否为只读 SQL 任务——那需要任务库上下文，由执行层负责。
+    """
+    text = (content or "").strip()
+    if not text:
+        raise TaskError("工作流定义不能为空")
+    if len(text) > MAX_SQL_CHARS:
+        raise TaskError(
+            f"工作流定义太长（{len(text)} 字符，上限 {MAX_SQL_CHARS}）"
+        )
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        raise TaskError(f"工作流定义不是合法 JSON：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise TaskError('工作流定义必须是 JSON 对象，形如 {"steps": [...]}')
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list):
+        raise TaskError('工作流定义缺少 steps 数组，形如 {"steps": [...]}')
+    if len(raw_steps) > MAX_WORKFLOW_STEPS:
+        raise TaskError(
+            f"工作流步骤太多（{len(raw_steps)} 步，上限 {MAX_WORKFLOW_STEPS}）；"
+            "请拆成多个工作流"
+        )
+    steps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_steps, start=1):
+        if not isinstance(raw, dict):
+            raise TaskError(f"第 {index} 个步骤必须是 JSON 对象")
+        key = str(raw.get("key") or "").strip()
+        if not _WORKFLOW_STEP_KEY_RE.match(key):
+            raise TaskError(
+                f"第 {index} 个步骤的 key 不合法（只允许字母/数字/下划线/"
+                f"短横，1–{MAX_WORKFLOW_STEP_KEY} 字符）"
+            )
+        if key in seen:
+            raise TaskError(f"步骤 key 重复：{key}")
+        seen.add(key)
+        task_id = str(raw.get("task_id") or "").strip()
+        if not task_id:
+            raise TaskError(f"步骤 {key} 还没有选择任务")
+        raw_deps = raw.get("depends_on")
+        if raw_deps is None:
+            raw_deps = []
+        if not isinstance(raw_deps, list):
+            raise TaskError(f"步骤 {key} 的 depends_on 必须是数组")
+        depends: list[str] = []
+        for dep in raw_deps:
+            dep_key = str(dep or "").strip()
+            if dep_key and dep_key not in depends:
+                depends.append(dep_key)
+        steps.append({"key": key, "task_id": task_id, "depends_on": depends})
+    keys = {step["key"] for step in steps}
+    for step in steps:
+        for dep in step["depends_on"]:
+            if dep == step["key"]:
+                raise TaskError(f"步骤 {step['key']} 不能依赖自己")
+            if dep not in keys:
+                raise TaskError(
+                    f"步骤 {step['key']} 依赖的步骤不存在：{dep}")
+    topological_order(steps)  # 提前把环暴露出来
+    return steps
+
+
+def topological_order(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """稳定拓扑排序：同层按用户书写顺序执行，结果可预期。"""
+    by_key = {step["key"]: step for step in steps}
+    indegree = {step["key"]: 0 for step in steps}
+    for step in steps:
+        for _dep in step["depends_on"]:
+            indegree[step["key"]] += 1
+    ready = [step["key"] for step in steps if indegree[step["key"]] == 0]
+    ordered: list[dict[str, Any]] = []
+    while ready:
+        key = ready.pop(0)
+        ordered.append(by_key[key])
+        for step in steps:
+            if key in step["depends_on"]:
+                indegree[step["key"]] -= 1
+                if indegree[step["key"]] == 0:
+                    ready.append(step["key"])
+    if len(ordered) != len(steps):
+        raise TaskError("工作流步骤存在循环依赖，请调整依赖关系")
+    return ordered
+
+
+def validate_task_workflow(content: str) -> str:
+    """校验工作流正文：结构合法、key 唯一、依赖存在、无环。"""
+    parse_workflow(content)
+    return (content or "").strip()
+
+
 def validate_task_kind(kind: str | None) -> str:
     """校验任务类型。默认 SQL；PySpark 仅保存代码与版本，执行器未接入。"""
     text = (kind or TASK_KIND_SQL).strip().lower()
@@ -229,7 +394,8 @@ def validate_task_content(kind: str, content: str) -> str:
 
     SQL 任务必须单条只读查询（会被真正执行）；
     PySpark 任务只是保存代码与版本，执行器未接入，因此不做只读语法限制；
-    写入任务走受控写守门（单表 + 带条件），执行时还要再过影响行数上限。
+    写入任务走受控写守门（单表 + 带条件），执行时还要再过影响行数上限；
+    工作流任务正文是步骤 DAG 的 JSON，步骤本身在触发时再校验。
     """
     if kind == TASK_KIND_PYSPARK:
         text = (content or "").strip()
@@ -242,6 +408,8 @@ def validate_task_content(kind: str, content: str) -> str:
         return text
     if kind == TASK_KIND_WRITE:
         return validate_task_write(content)
+    if kind == TASK_KIND_WORKFLOW:
+        return validate_task_workflow(content)
     return validate_task_sql(content)
 
 
@@ -768,6 +936,19 @@ class TaskStore:
         if current is None:
             return False
         with self._connect() as conn:
+            run_ids = [
+                row["run_id"]
+                for row in conn.execute(
+                    "SELECT run_id FROM workflow_run WHERE task_id = ?", (task_id,)
+                ).fetchall()
+            ]
+            for run_id in run_ids:
+                conn.execute(
+                    "DELETE FROM workflow_run_step WHERE run_id = ?", (run_id,))
+            conn.execute(
+                "DELETE FROM workflow_run WHERE task_id = ?", (task_id,))
+            conn.execute(
+                "DELETE FROM workflow_schedule WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM task_revision WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM task WHERE task_id = ?", (task_id,))
         return True
@@ -899,6 +1080,185 @@ class TaskStore:
             for p in sorted(affected, key=len, reverse=True):
                 conn.execute("DELETE FROM task_folder WHERE path = ?", (p,))
         return len(affected)
+
+    # ------------------------------------------------- 工作流调度（一期）
+    def workflow_schedule(self, task_id: str) -> dict[str, Any] | None:
+        """读取工作流的 cron 配置；没配置过返回 None（默认不调度）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_schedule WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def save_workflow_schedule(self, task_id: str, *, cron: str,
+                               enabled: bool,
+                               next_run_at: str = "") -> dict[str, Any]:
+        """保存 cron 配置（存在即更新，保留 last_run_at）。"""
+        now = self._now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_run_at FROM workflow_schedule WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            last_run_at = str(row["last_run_at"]) if row is not None else ""
+            conn.execute(
+                "INSERT INTO workflow_schedule (task_id, cron, enabled, "
+                "next_run_at, last_run_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET "
+                "cron = excluded.cron, enabled = excluded.enabled, "
+                "next_run_at = excluded.next_run_at, "
+                "updated_at = excluded.updated_at",
+                (task_id, cron, 1 if enabled else 0, next_run_at,
+                 last_run_at, now, now),
+            )
+        return {
+            "task_id": task_id,
+            "cron": cron,
+            "enabled": bool(enabled),
+            "next_run_at": next_run_at,
+            "last_run_at": last_run_at,
+        }
+
+    def mark_schedule_fired(self, task_id: str, *, last_run_at: str,
+                            next_run_at: str) -> None:
+        """调度线程触发成功后推进 last_run_at / next_run_at。"""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE workflow_schedule SET last_run_at = ?, "
+                "next_run_at = ?, updated_at = ? WHERE task_id = ?",
+                (last_run_at, next_run_at, self._now(), task_id),
+            )
+
+    def list_schedules(self) -> list[dict[str, Any]]:
+        """调度线程用：本项目所有 cron 配置（含未启用的，由调用方过滤）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_schedule ORDER BY task_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_workflow_run(self, task: Task, *, trigger: str,
+                            steps: list[dict[str, Any]]) -> dict[str, Any]:
+        """创建运行实例（状态 running，步骤初始 pending）。"""
+        run_id = f"wf-{uuid.uuid4().hex[:12]}"
+        started_at = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO workflow_run (run_id, task_id, project_id, "
+                "trigger, status, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, task.task_id, task.project_id, trigger,
+                 "running", started_at),
+            )
+            for step in steps:
+                conn.execute(
+                    "INSERT INTO workflow_run_step (run_id, step_key, "
+                    "task_id, task_name, depends_on, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (run_id, step["key"], step["task_id"],
+                     step.get("task_name") or "",
+                     json.dumps(step.get("depends_on") or [],
+                                ensure_ascii=False),
+                     "pending"),
+                )
+        return {
+            "run_id": run_id,
+            "task_id": task.task_id,
+            "project_id": task.project_id,
+            "trigger": trigger,
+            "status": "running",
+            "started_at": started_at,
+            "finished_at": "",
+        }
+
+    def running_workflow_run(self, task_id: str) -> dict[str, Any] | None:
+        """同一工作流同时只允许一个实例（触发与调度共用这个判断）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_run WHERE task_id = ? "
+                "AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def update_workflow_step(self, run_id: str, step_key: str, *,
+                             status: str, rows: int = 0, error: str = "",
+                             started: bool = False,
+                             finished: bool = False) -> None:
+        """更新实例里某一步的状态；时间戳由调用方决定是否刷新。"""
+        sets = ["status = ?", "rows = ?", "error = ?"]
+        params: list[Any] = [status, rows, error]
+        if started:
+            sets.append("started_at = ?")
+            params.append(self._now())
+        if finished:
+            sets.append("finished_at = ?")
+            params.append(self._now())
+        params.extend([run_id, step_key])
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE workflow_run_step SET {', '.join(sets)} "
+                "WHERE run_id = ? AND step_key = ?",
+                params,
+            )
+
+    def finish_workflow_run(self, run_id: str, *, status: str,
+                            error: str = "") -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE workflow_run SET status = ?, error = ?, "
+                "finished_at = ? WHERE run_id = ?",
+                (status, error, self._now(), run_id),
+            )
+
+    def list_workflow_runs(self, task_id: str,
+                           *, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_run WHERE task_id = ? "
+                "ORDER BY started_at DESC LIMIT ?",
+                (task_id, int(limit)),
+            ).fetchall()
+        return [self._decorate_run(dict(row)) for row in rows]
+
+    def workflow_run(self, run_id: str) -> dict[str, Any] | None:
+        """实例详情（含步骤列表，按创建顺序）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_run WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            step_rows = conn.execute(
+                "SELECT * FROM workflow_run_step WHERE run_id = ? "
+                "ORDER BY rowid",
+                (run_id,),
+            ).fetchall()
+        run = self._decorate_run(dict(row))
+        steps: list[dict[str, Any]] = []
+        for step_row in step_rows:
+            step = dict(step_row)
+            try:
+                step["depends_on"] = json.loads(step.get("depends_on") or "[]")
+            except ValueError:
+                step["depends_on"] = []
+            steps.append(step)
+        run["steps"] = steps
+        return run
+
+    def _decorate_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        with self._connect() as conn:
+            counts = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM workflow_run_step "
+                "WHERE run_id = ? GROUP BY status",
+                (run["run_id"],),
+            ).fetchall()
+        summary = {str(row["status"]): int(row["n"]) for row in counts}
+        run["total_steps"] = sum(summary.values())
+        run["succeeded_steps"] = summary.get("success", 0)
+        run["failed_steps"] = summary.get("failed", 0)
+        return run
 
     def move(self, task_id: str, folder: str) -> Task:
         """把任务移动到另一个文件夹（元数据操作，不生成新版本）。"""

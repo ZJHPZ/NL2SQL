@@ -24,6 +24,8 @@ import type {
   TaskRunResponse,
   TaskRunResultPayload,
   TaskSummary,
+  WorkflowRun,
+  WorkflowSchedule,
   WriteAuditEntry,
   WriteDryRunResponse,
 } from '../types'
@@ -31,6 +33,8 @@ import { ResultTable } from './ResultTable'
 
 /** CodeMirror 只在打开任务时才需要，单独拆 chunk 不拖慢首屏。 */
 const SqlEditor = lazy(() => import('./SqlEditor'))
+/** 工作流步骤编辑器同理：只有打开工作流任务才加载。 */
+const WorkflowEditor = lazy(() => import('./WorkflowEditor'))
 
 const errText = (r: { error: { error: string; detail: string } }) =>
   `${r.error.error}: ${r.error.detail}`
@@ -39,15 +43,64 @@ const KIND_LABEL: Record<string, string> = {
   sql: 'SQL 查询',
   pyspark: 'PySpark',
   write: '写入（受控写）',
+  workflow: '工作流',
 }
 
 const KIND_HINT: Record<string, string> = {
   sql: '只读 SELECT / WITH，可直接运行',
   pyspark: '可保存与版本管理，执行器尚未接入',
   write: '仅单表 INSERT / UPDATE / DELETE，必须带 WHERE；先预演，确认后提交',
+  workflow:
+    '按步骤依赖顺序执行只读 SQL 任务；支持手动触发与 cron 调度，失败即停',
 }
 
+/** 实例状态 → 中文 / 徽标 */
+const RUN_STATUS_LABEL: Record<string, string> = {
+  running: '运行中',
+  success: '成功',
+  failed: '失败',
+  pending: '等待',
+  skipped: '跳过',
+}
 
+function runStatusLabel(status: string): string {
+  return RUN_STATUS_LABEL[status] ?? status
+}
+
+function runStatusBadge(status: string): string {
+  if (status === 'success') return 'badge badge-ok'
+  if (status === 'failed') return 'badge badge-warn'
+  if (status === 'running') return 'badge badge-write'
+  return 'badge'
+}
+
+function triggerLabel(trigger: string): string {
+  if (trigger === 'cron') return '定时'
+  if (trigger === 'rerun') return '重跑'
+  return '手动'
+}
+
+/** 运行时长（实例还没结束时显示「进行中」） */
+function runDuration(run: WorkflowRun): string {
+  if (!run.started_at) return '—'
+  const start = new Date(run.started_at).getTime()
+  const end = run.finished_at ? new Date(run.finished_at).getTime() : Date.now()
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return '—'
+  const ms = Math.max(0, end - start)
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms / 60_000)}m`
+}
+
+function fmtWhen(raw: string): string {
+  if (!raw) return '—'
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return raw
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate(),
+  )} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
 /** 任务返回值补成 ResultTable 认识的 ResultPayload。 */
 function toResultPayload(r: TaskRunResultPayload): ResultPayload {
   const rows = r.rows ?? []
@@ -93,12 +146,14 @@ function joinFolder(parent: string, name: string): string {
 function kindDotClass(kind: string): string {
   if (kind === 'pyspark') return 'kind-dot kind-pyspark'
   if (kind === 'write') return 'kind-dot kind-write'
+  if (kind === 'workflow') return 'kind-dot kind-workflow'
   return 'kind-dot'
 }
 
 function kindTag(kind: string): string {
   if (kind === 'pyspark') return 'py'
   if (kind === 'write') return 'wr'
+  if (kind === 'workflow') return 'wf'
   return 'sql'
 }
 
@@ -451,9 +506,9 @@ export function TasksPanel({
   const [tabs, setTabs] = useState<{ id: string; name: string }[]>([])
   const [sideQuery, setSideQuery] = useState('')
   /** 底部面板：null = 收起。 */
-  const [bottom, setBottom] = useState<'run' | 'history' | 'info' | 'audit' | null>(
-    'run',
-  )
+  const [bottom, setBottom] = useState<
+    'run' | 'history' | 'info' | 'audit' | 'schedule' | null
+  >('run')
   /** 编辑器补全用的数据源表结构（引擎默认库，与任务执行同一源）。 */
   const [editorTables, setEditorTables] = useState<TableInfo[]>([])
   /** 有未保存 SQL 时点了别的 tab：先弹确认，别默默丢改动。 */
@@ -497,10 +552,25 @@ export function TasksPanel({
   const [auditBusy, setAuditBusy] = useState(false)
   const [auditError, setAuditError] = useState<string | null>(null)
 
+  // 调度编排（P1）：工作流实例 + cron 配置
+  const [wfRuns, setWfRuns] = useState<WorkflowRun[] | null>(null)
+  const [wfBusy, setWfBusy] = useState(false)
+  const [wfRunning, setWfRunning] = useState(false)
+  const [wfError, setWfError] = useState<string | null>(null)
+  const [wfOpenRun, setWfOpenRun] = useState<string | null>(null)
+  const [schedule, setSchedule] = useState<WorkflowSchedule | null>(null)
+  const [schedCron, setSchedCron] = useState('')
+  const [schedEnabled, setSchedEnabled] = useState(false)
+  const [schedBusy, setSchedBusy] = useState(false)
+  const [schedMsg, setSchedMsg] = useState<string | null>(null)
+  const [schedError, setSchedError] = useState<string | null>(null)
+
   // 新建任务对话框
   const [newTask, setNewTask] = useState<{ folder: string } | null>(null)
   const [ntName, setNtName] = useState('')
-  const [ntKind, setNtKind] = useState<'sql' | 'pyspark' | 'write'>('sql')
+  const [ntKind, setNtKind] = useState<'sql' | 'pyspark' | 'write' | 'workflow'>(
+    'sql',
+  )
   const [ntDesc, setNtDesc] = useState('')
   const [ntSql, setNtSql] = useState('')
   const [ntBusy, setNtBusy] = useState(false)
@@ -571,6 +641,15 @@ export function TasksPanel({
     setBottom('run')
     setWriteResult(null)
     setAudit(null)
+    setWfRuns(null)
+    setWfRunning(false)
+    setWfError(null)
+    setWfOpenRun(null)
+    setSchedule(null)
+    setSchedCron('')
+    setSchedEnabled(false)
+    setSchedMsg(null)
+    setSchedError(null)
     void refreshAll()
   }, [isDefaultProject, projectId, refreshAll])
 
@@ -587,6 +666,49 @@ export function TasksPanel({
     }
   }, [projectId])
 
+  // ------------------------------------------------------------ 调度编排数据
+  /** 拉实例列表；返回 running 让调用方决定继续轮询还是收手。 */
+  const loadWfRuns = useCallback(
+    async (taskId: string) => {
+      const r = await api.workflowRuns(projectId, taskId, 20)
+      if (!r.ok) {
+        setWfError(errText(r))
+        return null
+      }
+      setWfError(null)
+      setWfRuns(r.data.runs ?? [])
+      setWfRunning(r.data.running)
+      return r.data
+    },
+    [projectId],
+  )
+
+  /** 拉 cron 配置（进入工作流时同步一次）。 */
+  const loadSchedule = useCallback(
+    async (taskId: string) => {
+      const r = await api.workflowSchedule(projectId, taskId)
+      if (!r.ok) {
+        setSchedError(errText(r))
+        return null
+      }
+      setSchedError(null)
+      setSchedule(r.data)
+      setSchedCron(r.data.cron ?? '')
+      setSchedEnabled(r.data.enabled ?? false)
+      return r.data
+    },
+    [projectId],
+  )
+
+  // 实例在跑时轮询：每一步都是只读 SQL，通常几秒结束。
+  useEffect(() => {
+    if (!wfRunning || !selectedId) return
+    const timer = window.setInterval(() => {
+      void loadWfRuns(selectedId)
+    }, 1200)
+    return () => window.clearInterval(timer)
+  }, [wfRunning, selectedId, loadWfRuns])
+
   const openTask = useCallback(
     async (taskId: string) => {
       setSelectedId(taskId)
@@ -597,6 +719,15 @@ export function TasksPanel({
       setRunError(null)
       setWriteResult(null)
       setAudit(null)
+      setWfRuns(null)
+      setWfRunning(false)
+      setWfError(null)
+      setWfOpenRun(null)
+      setSchedule(null)
+      setSchedCron('')
+      setSchedEnabled(false)
+      setSchedMsg(null)
+      setSchedError(null)
       setBottom('run')
       setSaveMsg(null)
       setSaveError(null)
@@ -618,8 +749,12 @@ export function TasksPanel({
           ? prev.map((t) => (t.id === taskId ? { ...t, name: r.data.task.name } : t))
           : [...prev, { id: taskId, name: r.data.task.name }],
       )
+      if (r.data.task.kind === 'workflow') {
+        void loadWfRuns(taskId)
+        void loadSchedule(taskId)
+      }
     },
-    [projectId],
+    [projectId, loadWfRuns, loadSchedule],
   )
 
   /** 关闭 tab：关掉当前 tab 就切到最后一个；没有任务了回概览。 */
@@ -773,7 +908,9 @@ export function TasksPanel({
       setRunError(
         detail.task.kind === 'write'
           ? '写入任务不直接运行：请先「预演写入」，确认影响行数后再提交'
-          : 'PySpark 任务执行器尚未接入，当前只能保存与版本管理',
+          : detail.task.kind === 'workflow'
+            ? '工作流请用「运行工作流」触发：按步骤依赖顺序执行，并记录一次运行实例'
+            : 'PySpark 任务执行器尚未接入，当前只能保存与版本管理',
       )
       return
     }
@@ -865,11 +1002,99 @@ export function TasksPanel({
     }
   }, [bottom, detail, audit, loadAudit])
 
+  /** 手动触发工作流（后台线程执行，前端轮询实例状态）。 */
+  const triggerWf = async () => {
+    if (!detail) return
+    if (sqlDirty) {
+      setRunError('工作流改动还没保存，运行的是已保存的版本')
+      return
+    }
+    setWfBusy(true)
+    setWfError(null)
+    setRunError(null)
+    const r = await api.runWorkflow(projectId, detail.task.task_id)
+    setWfBusy(false)
+    if (!r.ok) {
+      setWfError(errText(r))
+      setBottom('run')
+      return
+    }
+    setBottom('run')
+    setWfRunning(true)
+    await loadWfRuns(detail.task.task_id)
+    await loadList()
+  }
+
+  /** 重跑某次实例：用当前保存的工作流定义再跑一遍（trigger=rerun）。 */
+  const rerunWf = async (runId: string) => {
+    if (!detail) return
+    setWfBusy(true)
+    setWfError(null)
+    const r = await api.rerunWorkflow(projectId, detail.task.task_id, runId)
+    setWfBusy(false)
+    if (!r.ok) {
+      setWfError(errText(r))
+      return
+    }
+    setWfRunning(true)
+    await loadWfRuns(detail.task.task_id)
+  }
+
+  /** 展开某次实例的步骤明细（首次展开时拉一次详情，列表接口不带步骤）。 */
+  const toggleRun = async (runId: string) => {
+    if (wfOpenRun === runId) {
+      setWfOpenRun(null)
+      return
+    }
+    setWfOpenRun(runId)
+    const existing = wfRuns?.find((r) => r.run_id === runId)
+    if (existing?.steps || !detail) return
+    const r = await api.workflowRun(projectId, detail.task.task_id, runId)
+    if (!r.ok) {
+      setWfError(errText(r))
+      return
+    }
+    setWfRuns((prev) =>
+      (prev ?? []).map((item) =>
+        item.run_id === runId ? { ...item, steps: r.data.run.steps } : item,
+      ),
+    )
+  }
+  const saveSchedule = async () => {
+    if (!detail) return
+    setSchedBusy(true)
+    setSchedMsg(null)
+    setSchedError(null)
+    const r = await api.updateWorkflowSchedule(projectId, detail.task.task_id, {
+      cron: schedCron.trim(),
+      enabled: schedEnabled,
+    })
+    setSchedBusy(false)
+    if (!r.ok) {
+      setSchedError(errText(r))
+      return
+    }
+    setSchedule(r.data)
+    setSchedCron(r.data.cron ?? '')
+    setSchedEnabled(r.data.enabled ?? false)
+    setSchedMsg(
+      r.data.enabled && r.data.next_run_at
+        ? `已启用：下次 ${fmtWhen(r.data.next_run_at)}`
+        : r.data.enabled
+          ? '已启用（等待排期）'
+          : '已关闭自动调度',
+    )
+  }
+
   /** 二期：格式化 SQL（按需懒加载 sql-formatter，不拖慢首屏）。 */
   const formatSql = async () => {
     if (!detail || !sql.trim()) return
-    if (detail.task.kind === 'pyspark') {
-      setRunError('PySpark 代码暂不支持格式化')
+    if (detail.task.kind !== 'sql' && detail.task.kind !== 'write') {
+      setRunError(
+        detail.task.kind === 'workflow'
+          ? '工作流定义是步骤 JSON，不支持 SQL 格式化'
+          : 'PySpark 代码暂不支持格式化',
+      )
       return
     }
     try {
@@ -1012,7 +1237,11 @@ export function TasksPanel({
       setNtError('任务名称不能为空')
       return
     }
-    if (!ntSql.trim()) {
+    // 工作流初始正文允许为空步骤（{"steps": []}），保存后用可视化步骤编辑器加点；
+    // 运行时会要求至少 1 步。
+    const content =
+      ntKind === 'workflow' && !ntSql.trim() ? '{"steps": []}' : ntSql
+    if (!content.trim()) {
       setNtError(
         ntKind === 'sql'
           ? 'SQL 不能为空'
@@ -1026,7 +1255,7 @@ export function TasksPanel({
     setNtError(null)
     const r = await api.createTask(projectId, {
       name: ntName.trim(),
-      sql: ntSql,
+      sql: content,
       description: ntDesc.trim(),
       folder: newTask.folder,
       kind: ntKind,
@@ -1050,7 +1279,7 @@ export function TasksPanel({
 
   const menuItems: MenuItem[] = menu
     ? [
-        { label: '新建任务', hint: 'SQL / 写入 / PySpark', onSelect: () => openNewTask(menuFolder) },
+        { label: '新建任务', hint: 'SQL / 写入 / PySpark / 工作流', onSelect: () => openNewTask(menuFolder) },
         { label: '新建子文件夹', onSelect: () => openNewFolder(menuFolder) },
         { label: '重命名文件夹', onSelect: () => openRenameFolder(menuFolder) },
         { label: '删除文件夹', danger: true, onSelect: () => setDeleteFolder({ path: menuFolder }) },
@@ -1083,6 +1312,7 @@ export function TasksPanel({
     sql: (tasks ?? []).filter((t) => t.kind === 'sql').length,
     write: (tasks ?? []).filter((t) => t.kind === 'write').length,
     pyspark: (tasks ?? []).filter((t) => t.kind === 'pyspark').length,
+    workflow: (tasks ?? []).filter((t) => t.kind === 'workflow').length,
   }
 
   return (
@@ -1250,6 +1480,10 @@ export function TasksPanel({
                   <b>{stats.pyspark}</b>
                   <span>PySpark</span>
                 </div>
+                <div className="ide-stat">
+                  <b>{stats.workflow}</b>
+                  <span>工作流</span>
+                </div>
               </div>
               <div className="ide-overview-cols">
                 <section className="ide-card">
@@ -1319,11 +1553,17 @@ export function TasksPanel({
                 <span className="spacer" />
                 <button
                   className="btn btn-ghost btn-tiny"
-                  disabled={detail.task.kind === 'pyspark' || !sql.trim()}
+                  disabled={
+                    detail.task.kind === 'pyspark' ||
+                    detail.task.kind === 'workflow' ||
+                    !sql.trim()
+                  }
                   title={
                     detail.task.kind === 'pyspark'
                       ? 'PySpark 代码暂不支持格式化'
-                      : '格式化 SQL（Ctrl+Shift+F）'
+                      : detail.task.kind === 'workflow'
+                        ? '工作流定义是步骤 JSON，不支持 SQL 格式化'
+                        : '格式化 SQL（Ctrl+Shift+F）'
                   }
                   onClick={() => void formatSql()}
                 >
@@ -1349,6 +1589,21 @@ export function TasksPanel({
                     onClick={() => void previewWrite()}
                   >
                     {writeBusy ? '预演中…' : '预演写入'}
+                  </button>
+                ) : detail.task.kind === 'workflow' ? (
+                  <button
+                    className="btn btn-tiny"
+                    disabled={wfBusy || wfRunning || sqlDirty}
+                    title={
+                      sqlDirty
+                        ? '先保存工作流再运行'
+                        : wfRunning
+                          ? '已有实例在运行'
+                          : '按步骤依赖顺序执行只读 SQL，并记录一次运行实例'
+                    }
+                    onClick={() => void triggerWf()}
+                  >
+                    {wfBusy ? '触发中…' : wfRunning ? '运行中…' : '运行工作流'}
                   </button>
                 ) : (
                   <button
@@ -1384,29 +1639,48 @@ export function TasksPanel({
                 </div>
               )}
 
-              <div className="editor-cols">
+              <div
+                className={
+                  detail.task.kind === 'workflow'
+                    ? 'editor-cols editor-cols-wf'
+                    : 'editor-cols'
+                }
+              >
                 <Suspense
                   fallback={
                     <div className="editor-loading mono">正在加载编辑器…</div>
                   }
                 >
-                  <SqlEditor
-                    value={sql}
-                    onChange={(next) => {
-                      setSql(next)
-                      setSqlDirty(true)
-                    }}
-                    tables={detail.task.kind === 'pyspark' ? [] : editorTables}
-                    ariaLabel={
-                      detail.task.kind === 'pyspark' ? 'PySpark 代码' : 'SQL 代码'
-                    }
-                    onSave={() => void saveTask()}
-                    onFormat={
-                      detail.task.kind === 'sql'
-                        ? () => void formatSql()
-                        : undefined
-                    }
-                  />
+                  {detail.task.kind === 'workflow' ? (
+                    <WorkflowEditor
+                      value={sql}
+                      onChange={(next) => {
+                        setSql(next)
+                        setSqlDirty(true)
+                      }}
+                      candidates={tasks ?? []}
+                      currentTaskId={detail.task.task_id}
+                      disabled={saveBusy}
+                    />
+                  ) : (
+                    <SqlEditor
+                      value={sql}
+                      onChange={(next) => {
+                        setSql(next)
+                        setSqlDirty(true)
+                      }}
+                      tables={detail.task.kind === 'pyspark' ? [] : editorTables}
+                      ariaLabel={
+                        detail.task.kind === 'pyspark' ? 'PySpark 代码' : 'SQL 代码'
+                      }
+                      onSave={() => void saveTask()}
+                      onFormat={
+                        detail.task.kind === 'sql'
+                          ? () => void formatSql()
+                          : undefined
+                      }
+                    />
+                  )}
                 </Suspense>
               </div>
 
@@ -1416,7 +1690,9 @@ export function TasksPanel({
                     ? KIND_HINT.pyspark
                     : detail.task.kind === 'write'
                       ? KIND_HINT.write
-                      : `只读 ${KIND_HINT.sql}`}
+                      : detail.task.kind === 'workflow'
+                        ? KIND_HINT.workflow
+                        : `只读 ${KIND_HINT.sql}`}
                 </span>
                 <span className="spacer" />
                 {sqlDirty ? (
@@ -1425,7 +1701,9 @@ export function TasksPanel({
                   <span className="meta mono">{lineCount} 行 · 已保存</span>
                 )}
                 <span className="meta mono">
-                  Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全 · Ctrl+Shift+F 格式化
+                  {detail.task.kind === 'workflow'
+                    ? '保存后可在底部「运行实例 / 调度」里触发与排期'
+                    : 'Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全 · Ctrl+Shift+F 格式化'}
                 </span>
               </div>
 
@@ -1438,11 +1716,31 @@ export function TasksPanel({
                     className={bottom === 'run' ? 'bottom-tab active' : 'bottom-tab'}
                     onClick={() => setBottom(bottom === 'run' ? null : 'run')}
                   >
-                    运行记录
-                    {(runResult || writeResult) && (
+                    {detail.task.kind === 'workflow' ? '运行实例' : '运行记录'}
+                    {(runResult ||
+                      writeResult ||
+                      (detail.task.kind === 'workflow' && (wfRuns?.length ?? 0) > 0)) && (
                       <span className="bottom-dot" aria-hidden="true" />
                     )}
                   </button>
+                  {detail.task.kind === 'workflow' && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={bottom === 'schedule'}
+                      className={
+                        bottom === 'schedule' ? 'bottom-tab active' : 'bottom-tab'
+                      }
+                      onClick={() =>
+                        setBottom(bottom === 'schedule' ? null : 'schedule')
+                      }
+                    >
+                      调度
+                      {schedule?.enabled && (
+                        <span className="bottom-dot" aria-hidden="true" />
+                      )}
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="tab"
@@ -1485,7 +1783,99 @@ export function TasksPanel({
                   <div className="bottom-body">
                     {bottom === 'run' && (
                       <>
-                        {detail.task.kind === 'write' ? (
+                        {detail.task.kind === 'workflow' ? (
+                          <>
+                            {wfError && (
+                              <div className="alert alert-bad">{wfError}</div>
+                            )}
+                            {(!wfRuns || wfRuns.length === 0) && !wfRunning && (
+                              <p className="meta bottom-empty">
+                                还没有运行实例。保存后点「运行工作流」：会按依赖顺序执行只读
+                                SQL，失败即停；也可以在「调度」里配置 cron 自动触发。
+                              </p>
+                            )}
+                            {wfRunning && (
+                              <p className="meta">
+                                正在运行（按依赖顺序串行执行，失败即停）…
+                              </p>
+                            )}
+                            {wfRuns && wfRuns.length > 0 && (
+                              <ul className="wf-run-list">
+                                {wfRuns.map((run) => (
+                                  <li key={run.run_id} className="wf-run">
+                                    <button
+                                      type="button"
+                                      className="wf-run-row"
+                                      aria-expanded={wfOpenRun === run.run_id}
+                                      onClick={() => void toggleRun(run.run_id)}
+                                    >
+                                      <span className={runStatusBadge(run.status)}>
+                                        {runStatusLabel(run.status)}
+                                      </span>
+                                      <span className="wf-run-trigger mono">
+                                        {triggerLabel(run.trigger)}
+                                      </span>
+                                      <span className="mono">
+                                        {fmtWhen(run.started_at)}
+                                      </span>
+                                      <span className="mono">{runDuration(run)}</span>
+                                      <span className="meta mono">
+                                        {run.succeeded_steps}/{run.total_steps} 步成功
+                                        {run.failed_steps > 0
+                                          ? ` · ${run.failed_steps} 失败`
+                                          : ''}
+                                      </span>
+                                      <span className="spacer" />
+                                      <span className="meta mono">{run.run_id}</span>
+                                      <span className="linkbtn mono">
+                                        {wfOpenRun === run.run_id ? '收起' : '步骤'}
+                                      </span>
+                                    </button>
+                                    {run.error && (
+                                      <div className="meta wf-run-error">{run.error}</div>
+                                    )}
+                                    {wfOpenRun === run.run_id && (
+                                      <div className="wf-run-steps">
+                                        {(run.steps ?? []).map((step) => (
+                                          <div
+                                            className="wf-run-step"
+                                            key={step.step_key}
+                                          >
+                                            <span className="mono wf-run-step-key">
+                                              {step.step_key}
+                                            </span>
+                                            <span className={runStatusBadge(step.status)}>
+                                              {runStatusLabel(step.status)}
+                                            </span>
+                                            <span className="wf-run-step-name">
+                                              {step.task_name || step.task_id}
+                                            </span>
+                                            <span className="meta mono">
+                                              {step.rows > 0 ? `${step.rows} 行` : '—'}
+                                            </span>
+                                          </div>
+                                        ))}
+                                        {(run.steps ?? []).length === 0 && (
+                                          <p className="meta">正在读取步骤明细…</p>
+                                        )}
+                                        <div className="wf-run-actions">
+                                          <button
+                                            type="button"
+                                            className="linkbtn"
+                                            disabled={wfBusy || wfRunning}
+                                            onClick={() => void rerunWf(run.run_id)}
+                                          >
+                                            重跑这次实例
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </>
+                        ) : detail.task.kind === 'write' ? (
                           <>
                             {!writeResult && !writeBusy && (
                               <p className="meta bottom-empty">
@@ -1671,7 +2061,11 @@ export function TasksPanel({
                           <select
                             value={detail.task.kind}
                             onChange={(e) => {
-                              const kind = e.target.value as 'sql' | 'pyspark' | 'write'
+                              const kind = e.target.value as
+                                | 'sql'
+                                | 'pyspark'
+                                | 'write'
+                                | 'workflow'
                               if (kind === detail.task.kind) return
                               void (async () => {
                                 setSaveBusy(true)
@@ -1693,6 +2087,7 @@ export function TasksPanel({
                             <option value="sql">SQL 查询</option>
                             <option value="pyspark">PySpark</option>
                             <option value="write">写入（受控写）</option>
+                            <option value="workflow">工作流（调度编排）</option>
                           </select>
                         </label>
                         <label className="field span2">
@@ -1775,6 +2170,51 @@ export function TasksPanel({
                         )}
                       </div>
                     )}
+
+                    {bottom === 'schedule' && (
+                      <div className="wf-schedule">
+                        <div className="meta bottom-history-hint">
+                          5 段 cron（分 时 日 月 周，本地时区）到点自动触发；同一工作流同一时间
+                          只会跑一个实例，失败即停。关闭调度不影响手动运行。
+                        </div>
+                        <div className="wf-schedule-form">
+                          <label className="field">
+                            <span>cron 表达式</span>
+                            <input
+                              className="mono"
+                              value={schedCron}
+                              placeholder="0 2 * * *（每天 02:00）"
+                              onChange={(e) => setSchedCron(e.target.value)}
+                            />
+                          </label>
+                          <label className="wf-check">
+                            <input
+                              type="checkbox"
+                              checked={schedEnabled}
+                              onChange={(e) => setSchedEnabled(e.target.checked)}
+                            />
+                            <span>启用自动调度</span>
+                          </label>
+                          <button
+                            type="button"
+                            className="btn btn-tiny"
+                            disabled={schedBusy || !schedCron.trim()}
+                            onClick={() => void saveSchedule()}
+                          >
+                            {schedBusy ? '保存中…' : '保存调度'}
+                          </button>
+                        </div>
+                        {schedMsg && <div className="meta wf-schedule-msg">{schedMsg}</div>}
+                        {schedError && <div className="alert alert-bad">{schedError}</div>}
+                        {schedule && (
+                          <div className="meta mono wf-schedule-meta">
+                            状态：{schedule.enabled ? '已启用' : '已关闭'} · 下次触发：
+                            {fmtWhen(schedule.next_run_at)} · 上次触发：
+                            {fmtWhen(schedule.last_run_at)}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1812,11 +2252,16 @@ export function TasksPanel({
               <span>任务类型</span>
               <select
                 value={ntKind}
-                onChange={(e) => setNtKind(e.target.value as 'sql' | 'pyspark' | 'write')}
+                onChange={(e) =>
+                  setNtKind(
+                    e.target.value as 'sql' | 'pyspark' | 'write' | 'workflow',
+                  )
+                }
               >
                 <option value="sql">SQL 查询（可运行）</option>
                 <option value="pyspark">PySpark（可保存，执行器未接入）</option>
                 <option value="write">写入（受控写，先预演再提交）</option>
+                <option value="workflow">工作流（调度编排，先加步骤）</option>
               </select>
             </label>
             <label className="field span2">
@@ -1829,11 +2274,13 @@ export function TasksPanel({
                   ? 'PySpark 代码'
                   : ntKind === 'write'
                     ? '写入 SQL（单条 INSERT / UPDATE / DELETE，必须带 WHERE）'
-                    : 'SQL（只读）'}
+                    : ntKind === 'workflow'
+                      ? '工作流定义（可留空，创建后用步骤编辑器维护）'
+                      : 'SQL（只读）'}
               </span>
               <textarea
                 className="sql-editor mono"
-                rows={10}
+                rows={ntKind === 'workflow' ? 5 : 10}
                 value={ntSql}
                 spellCheck={false}
                 placeholder={
@@ -1841,7 +2288,9 @@ export function TasksPanel({
                     ? '例如：df = spark.read...'
                     : ntKind === 'write'
                       ? 'UPDATE probe_order SET status = \'paid\' WHERE order_id = 1'
-                      : 'SELECT ...'
+                      : ntKind === 'workflow'
+                        ? '留空即可（创建后默认 {"steps": []}）；也可以直接粘贴 {"steps": [...]} 结构'
+                        : 'SELECT ...'
                 }
                 onChange={(e) => setNtSql(e.target.value)}
               />
@@ -1852,7 +2301,11 @@ export function TasksPanel({
           <div className="modal-actions">
             <button
               className="btn btn-primary"
-              disabled={ntBusy || !ntName.trim() || !ntSql.trim()}
+              disabled={
+                ntBusy ||
+                !ntName.trim() ||
+                (ntKind !== 'workflow' && !ntSql.trim())
+              }
               onClick={() => void submitNewTask()}
             >
               {ntBusy ? '创建中…' : '创建任务'}

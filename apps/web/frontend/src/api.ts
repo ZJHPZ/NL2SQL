@@ -36,6 +36,10 @@ import type {
   TaskRunResponse,
   TaskUpdateResult,
   ToolsetInfo,
+  WorkflowRunDetailResponse,
+  WorkflowRunnerResponse,
+  WorkflowRunsResponse,
+  WorkflowSchedule,
   WriteAuditResponse,
   WriteCommitResponse,
   WriteDryRunResponse,
@@ -396,7 +400,7 @@ export const api = {
       sql: string
       description?: string
       folder?: string
-      kind?: 'sql' | 'pyspark' | 'write'
+      kind?: 'sql' | 'pyspark' | 'write' | 'workflow'
     },
   ) =>
     request<TaskCreateResult>(
@@ -419,7 +423,7 @@ export const api = {
       sql?: string
       description?: string
       folder?: string
-      kind?: 'sql' | 'pyspark' | 'write'
+      kind?: 'sql' | 'pyspark' | 'write' | 'workflow'
       note?: string
     },
   ) =>
@@ -497,6 +501,53 @@ export const api = {
   writeAudit: (projectId: string, limit = 50) =>
     request<WriteAuditResponse>(
       `/api/projects/${encodeURIComponent(projectId)}/write-audit?limit=${limit}`,
+    ),
+
+  // ------------------------------------------------------------ 调度编排（P1）
+  /** 手动触发一次工作流（后台线程按依赖顺序执行，返回 run_id 供轮询） */
+  runWorkflow: (projectId: string, taskId: string) =>
+    request<WorkflowRunnerResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/workflow/run`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  /** 重跑某次实例（复制同一版工作流定义，trigger=rerun） */
+  rerunWorkflow: (projectId: string, taskId: string, runId: string) =>
+    request<WorkflowRunnerResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}/rerun`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  workflowRuns: (projectId: string, taskId: string, limit = 20) =>
+    request<WorkflowRunsResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/runs?limit=${limit}`,
+    ),
+
+  workflowRun: (projectId: string, taskId: string, runId: string) =>
+    request<WorkflowRunDetailResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`,
+    ),
+
+  workflowSchedule: (projectId: string, taskId: string) =>
+    request<WorkflowSchedule>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/schedule`,
+    ),
+
+  /** cron 用 5 段（分 时 日 月 周），服务端用 APScheduler 校验并算下次触发 */
+  updateWorkflowSchedule: (
+    projectId: string,
+    taskId: string,
+    payload: { cron: string; enabled: boolean },
+  ) =>
+    request<WorkflowSchedule>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/schedule`,
+      { method: 'PUT', body: JSON.stringify(payload) },
     ),
 
   // ------------------------------------------------------------ 任务文件夹
