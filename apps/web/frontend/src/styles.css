@@ -6721,3 +6721,93 @@ table.grid td.mono {
     padding: 8px 10px;
   }
 }
+
+
+/* ---------------------------------------------------------------- v15：原生同步（P1）
+ * 同步是「搬表」不是写 SQL：表单用纸面字段，提示用赭石/朱红，与写入/工作流同族。
+ */
+.kind-dot.kind-sync {
+  background: var(--olive);
+}
+
+.ide-stats {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.editor-cols-form {
+  display: block;
+  overflow: auto;
+}
+
+.sync-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 22px;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background: var(--paper);
+}
+
+.sync-hint {
+  max-width: 760px;
+  line-height: 1.7;
+}
+
+.sync-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+  max-width: 860px;
+}
+
+.sync-grid .field {
+  margin: 0;
+}
+
+.sync-warn {
+  max-width: 760px;
+}
+
+.sync-target {
+  margin: 0;
+  max-width: 760px;
+  color: var(--ink-3);
+}
+
+.sync-json {
+  margin-top: 2px;
+  max-width: 860px;
+}
+
+.sync-json summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 12px;
+  width: fit-content;
+}
+
+.sync-json pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow: auto;
+  max-height: 220px;
+}
+
+@media (max-width: 900px) {
+  .sync-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+}
+
+@media (max-width: 640px) {
+  .sync-editor {
+    padding: 14px;
+  }
+}

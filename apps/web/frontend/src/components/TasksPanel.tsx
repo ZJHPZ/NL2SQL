@@ -17,7 +17,12 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type {
+  DataWriteSettings,
   ResultPayload,
+  SourceOut,
+  SyncEventEntry,
+  SyncPreviewResponse,
+  SyncState,
   TableInfo,
   TaskDetailResponse,
   TaskFolder,
@@ -35,6 +40,8 @@ import { ResultTable } from './ResultTable'
 const SqlEditor = lazy(() => import('./SqlEditor'))
 /** 工作流步骤编辑器同理：只有打开工作流任务才加载。 */
 const WorkflowEditor = lazy(() => import('./WorkflowEditor'))
+/** 同步配置表单：只有打开同步任务才加载。 */
+const SyncEditor = lazy(() => import('./SyncEditor'))
 
 const errText = (r: { error: { error: string; detail: string } }) =>
   `${r.error.error}: ${r.error.detail}`
@@ -44,6 +51,7 @@ const KIND_LABEL: Record<string, string> = {
   pyspark: 'PySpark',
   write: '写入（受控写）',
   workflow: '工作流',
+  sync: '数据同步',
 }
 
 const KIND_HINT: Record<string, string> = {
@@ -52,6 +60,7 @@ const KIND_HINT: Record<string, string> = {
   write: '仅单表 INSERT / UPDATE / DELETE，必须带 WHERE；先预演，确认后提交',
   workflow:
     '按步骤依赖顺序执行只读 SQL 任务；支持手动触发与 cron 调度，失败即停',
+  sync: '把源库一张表搬到项目写目标（SQLite）：全量或按水位列增量；先预演，确认后提交',
 }
 
 /** 实例状态 → 中文 / 徽标 */
@@ -147,6 +156,7 @@ function kindDotClass(kind: string): string {
   if (kind === 'pyspark') return 'kind-dot kind-pyspark'
   if (kind === 'write') return 'kind-dot kind-write'
   if (kind === 'workflow') return 'kind-dot kind-workflow'
+  if (kind === 'sync') return 'kind-dot kind-sync'
   return 'kind-dot'
 }
 
@@ -154,6 +164,7 @@ function kindTag(kind: string): string {
   if (kind === 'pyspark') return 'py'
   if (kind === 'write') return 'wr'
   if (kind === 'workflow') return 'wf'
+  if (kind === 'sync') return 'sy'
   return 'sql'
 }
 
@@ -565,12 +576,25 @@ export function TasksPanel({
   const [schedMsg, setSchedMsg] = useState<string | null>(null)
   const [schedError, setSchedError] = useState<string | null>(null)
 
+  // 原生同步（P1）：预演 → 确认提交 + 水位线状态 + 同步审计
+  const [projectMeta, setProjectMeta] = useState<{
+    sources: SourceOut[]
+    data_write?: DataWriteSettings
+  } | null>(null)
+  const [syncResult, setSyncResult] = useState<SyncPreviewResponse | null>(null)
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncCommitBusy, setSyncCommitBusy] = useState(false)
+  const [syncState, setSyncState] = useState<SyncState | null>(null)
+  const [syncEvents, setSyncEvents] = useState<SyncEventEntry[] | null>(null)
+  const [syncInfoBusy, setSyncInfoBusy] = useState(false)
+  const [syncInfoError, setSyncInfoError] = useState<string | null>(null)
+
   // 新建任务对话框
   const [newTask, setNewTask] = useState<{ folder: string } | null>(null)
   const [ntName, setNtName] = useState('')
-  const [ntKind, setNtKind] = useState<'sql' | 'pyspark' | 'write' | 'workflow'>(
-    'sql',
-  )
+  const [ntKind, setNtKind] = useState<
+    'sql' | 'pyspark' | 'write' | 'workflow' | 'sync'
+  >('sql')
   const [ntDesc, setNtDesc] = useState('')
   const [ntSql, setNtSql] = useState('')
   const [ntBusy, setNtBusy] = useState(false)
@@ -650,8 +674,32 @@ export function TasksPanel({
     setSchedEnabled(false)
     setSchedMsg(null)
     setSchedError(null)
+    setSyncResult(null)
+    setSyncState(null)
+    setSyncEvents(null)
+    setSyncInfoError(null)
     void refreshAll()
   }, [isDefaultProject, projectId, refreshAll])
+
+  // 同步编辑器要选"读源"与目标写库：项目详情里带 sources 与 data_write。
+  useEffect(() => {
+    if (isDefaultProject) {
+      setProjectMeta(null)
+      return
+    }
+    let alive = true
+    void api.getProject(projectId).then((r) => {
+      if (!alive) return
+      if (!r.ok) return
+      setProjectMeta({
+        sources: r.data.sources ?? [],
+        data_write: r.data.data_write,
+      })
+    })
+    return () => {
+      alive = false
+    }
+  }, [isDefaultProject, projectId])
 
   // 补全数据：/api/tables 不带 source_id 就是引擎默认数据源，
   // 与「运行任务」时后端选择的源一致；失败就静默降级成只补关键字。
@@ -700,6 +748,24 @@ export function TasksPanel({
     [projectId],
   )
 
+  // 原生同步：水位线状态 + 同步审计（进入同步任务时拉一次）。
+  const loadSyncInfo = useCallback(
+    async (taskId: string) => {
+      setSyncInfoBusy(true)
+      setSyncInfoError(null)
+      const r = await api.syncInfo(projectId, taskId)
+      setSyncInfoBusy(false)
+      if (!r.ok) {
+        setSyncInfoError(errText(r))
+        return null
+      }
+      setSyncState(r.data.state)
+      setSyncEvents(r.data.events ?? [])
+      return r.data
+    },
+    [projectId],
+  )
+
   // 实例在跑时轮询：每一步都是只读 SQL，通常几秒结束。
   useEffect(() => {
     if (!wfRunning || !selectedId) return
@@ -728,6 +794,10 @@ export function TasksPanel({
       setSchedEnabled(false)
       setSchedMsg(null)
       setSchedError(null)
+      setSyncResult(null)
+      setSyncState(null)
+      setSyncEvents(null)
+      setSyncInfoError(null)
       setBottom('run')
       setSaveMsg(null)
       setSaveError(null)
@@ -753,8 +823,11 @@ export function TasksPanel({
         void loadWfRuns(taskId)
         void loadSchedule(taskId)
       }
+      if (r.data.task.kind === 'sync') {
+        void loadSyncInfo(taskId)
+      }
     },
-    [projectId, loadWfRuns, loadSchedule],
+    [projectId, loadWfRuns, loadSchedule, loadSyncInfo],
   )
 
   /** 关闭 tab：关掉当前 tab 就切到最后一个；没有任务了回概览。 */
@@ -995,12 +1068,67 @@ export function TasksPanel({
     setAudit(r.data.audit ?? [])
   }, [projectId])
 
-  // 打开「写入审计」时按需拉取（不拖慢任务打开）。
+  // 打开「写入审计 / 同步审计」时按需拉取（不拖慢任务打开）。
   useEffect(() => {
-    if (bottom === 'audit' && detail?.task.kind === 'write' && audit === null) {
-      void loadAudit()
+    if (bottom !== 'audit' || !detail) return
+    if (detail.task.kind === 'write' && audit === null) void loadAudit()
+    if (detail.task.kind === 'sync' && syncEvents === null) {
+      void loadSyncInfo(detail.task.task_id)
     }
-  }, [bottom, detail, audit, loadAudit])
+  }, [bottom, detail, audit, syncEvents, loadAudit, loadSyncInfo])
+
+  /** 同步任务的「预演」：读源表算行数与样本，不写目标库。 */
+  const previewSync = async () => {
+    if (!detail) return
+    if (sqlDirty) {
+      setRunError('同步配置改动还没保存，预演的是已保存的版本')
+      return
+    }
+    setSyncBusy(true)
+    setRunError(null)
+    setSyncResult(null)
+    const r = await api.syncPreview(projectId, detail.task.task_id)
+    setSyncBusy(false)
+    if (!r.ok) {
+      setRunError(errText(r))
+      return
+    }
+    setSyncResult(r.data)
+    setBottom('run')
+    void loadSyncInfo(detail.task.task_id)
+  }
+
+  /** 凭预演凭据确认执行：重读源表，行数/水位一致才写目标库。 */
+  const commitSync = async () => {
+    if (!detail || !syncResult?.preview_id) return
+    setSyncCommitBusy(true)
+    setRunError(null)
+    const r = await api.syncCommit(
+      projectId,
+      detail.task.task_id,
+      syncResult.preview_id,
+    )
+    setSyncCommitBusy(false)
+    if (!r.ok) {
+      setRunError(errText(r))
+      setSyncResult(null)
+      void loadSyncInfo(detail.task.task_id)
+      return
+    }
+    if (r.data.status === 'committed') {
+      setSaveMsg(
+        `已同步 ${r.data.rows ?? 0} 行到 ${r.data.target_table ?? '目标表'}` +
+          (r.data.created_table ? '（自动建表）' : ''),
+      )
+      setSyncResult(null)
+      await reloadDetail()
+      await loadList()
+    } else {
+      setRunError(r.data.reason ?? '同步提交失败')
+      setSyncResult(null)
+    }
+    void loadSyncInfo(detail.task.task_id)
+  }
 
   /** 手动触发工作流（后台线程执行，前端轮询实例状态）。 */
   const triggerWf = async () => {
@@ -1093,7 +1221,9 @@ export function TasksPanel({
       setRunError(
         detail.task.kind === 'workflow'
           ? '工作流定义是步骤 JSON，不支持 SQL 格式化'
-          : 'PySpark 代码暂不支持格式化',
+          : detail.task.kind === 'sync'
+            ? '同步任务是搬运配置，不支持 SQL 格式化'
+            : 'PySpark 代码暂不支持格式化',
       )
       return
     }
@@ -1238,9 +1368,14 @@ export function TasksPanel({
       return
     }
     // 工作流初始正文允许为空步骤（{"steps": []}），保存后用可视化步骤编辑器加点；
-    // 运行时会要求至少 1 步。
+    // 同步任务允许空配置（保存后在表单里选源表），运行时才要求完整。
+    // 运行时会要求至少 1 步 / 完整的同步配置。
     const content =
-      ntKind === 'workflow' && !ntSql.trim() ? '{"steps": []}' : ntSql
+      ntKind === 'workflow' && !ntSql.trim()
+        ? '{"steps": []}'
+        : ntKind === 'sync' && !ntSql.trim()
+          ? '{"mode": "full"}'
+          : ntSql
     if (!content.trim()) {
       setNtError(
         ntKind === 'sql'
@@ -1313,6 +1448,7 @@ export function TasksPanel({
     write: (tasks ?? []).filter((t) => t.kind === 'write').length,
     pyspark: (tasks ?? []).filter((t) => t.kind === 'pyspark').length,
     workflow: (tasks ?? []).filter((t) => t.kind === 'workflow').length,
+    sync: (tasks ?? []).filter((t) => t.kind === 'sync').length,
   }
 
   return (
@@ -1484,6 +1620,10 @@ export function TasksPanel({
                   <b>{stats.workflow}</b>
                   <span>工作流</span>
                 </div>
+                <div className="ide-stat">
+                  <b>{stats.sync}</b>
+                  <span>数据同步</span>
+                </div>
               </div>
               <div className="ide-overview-cols">
                 <section className="ide-card">
@@ -1556,6 +1696,7 @@ export function TasksPanel({
                   disabled={
                     detail.task.kind === 'pyspark' ||
                     detail.task.kind === 'workflow' ||
+                    detail.task.kind === 'sync' ||
                     !sql.trim()
                   }
                   title={
@@ -1563,7 +1704,9 @@ export function TasksPanel({
                       ? 'PySpark 代码暂不支持格式化'
                       : detail.task.kind === 'workflow'
                         ? '工作流定义是步骤 JSON，不支持 SQL 格式化'
-                        : '格式化 SQL（Ctrl+Shift+F）'
+                        : detail.task.kind === 'sync'
+                          ? '同步任务是搬运配置，不支持 SQL 格式化'
+                          : '格式化 SQL（Ctrl+Shift+F）'
                   }
                   onClick={() => void formatSql()}
                 >
@@ -1605,6 +1748,19 @@ export function TasksPanel({
                   >
                     {wfBusy ? '触发中…' : wfRunning ? '运行中…' : '运行工作流'}
                   </button>
+                ) : detail.task.kind === 'sync' ? (
+                  <button
+                    className="btn btn-tiny"
+                    disabled={syncBusy || syncCommitBusy || sqlDirty}
+                    title={
+                      sqlDirty
+                        ? '先保存同步配置再预演'
+                        : '读源表算行数与样本，不写目标库；确认后在下方「确认提交」'
+                    }
+                    onClick={() => void previewSync()}
+                  >
+                    {syncBusy ? '预演中…' : '预演同步'}
+                  </button>
                 ) : (
                   <button
                     className="btn btn-tiny"
@@ -1641,8 +1797,9 @@ export function TasksPanel({
 
               <div
                 className={
-                  detail.task.kind === 'workflow'
-                    ? 'editor-cols editor-cols-wf'
+                  detail.task.kind === 'workflow' ||
+                  detail.task.kind === 'sync'
+                    ? 'editor-cols editor-cols-form'
                     : 'editor-cols'
                 }
               >
@@ -1660,6 +1817,17 @@ export function TasksPanel({
                       }}
                       candidates={tasks ?? []}
                       currentTaskId={detail.task.task_id}
+                      disabled={saveBusy}
+                    />
+                  ) : detail.task.kind === 'sync' ? (
+                    <SyncEditor
+                      value={sql}
+                      onChange={(next) => {
+                        setSql(next)
+                        setSqlDirty(true)
+                      }}
+                      sources={projectMeta?.sources ?? []}
+                      dataWrite={projectMeta?.data_write}
                       disabled={saveBusy}
                     />
                   ) : (
@@ -1692,7 +1860,9 @@ export function TasksPanel({
                       ? KIND_HINT.write
                       : detail.task.kind === 'workflow'
                         ? KIND_HINT.workflow
-                        : `只读 ${KIND_HINT.sql}`}
+                        : detail.task.kind === 'sync'
+                          ? KIND_HINT.sync
+                          : `只读 ${KIND_HINT.sql}`}
                 </span>
                 <span className="spacer" />
                 {sqlDirty ? (
@@ -1703,7 +1873,9 @@ export function TasksPanel({
                 <span className="meta mono">
                   {detail.task.kind === 'workflow'
                     ? '保存后可在底部「运行实例 / 调度」里触发与排期'
-                    : 'Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全 · Ctrl+Shift+F 格式化'}
+                    : detail.task.kind === 'sync'
+                      ? '保存后点「预演同步」看行数与样本，再在底部确认提交'
+                      : 'Ctrl+Enter 保存 · Tab 缩进 · Ctrl+Space 补全 · Ctrl+Shift+F 格式化'}
                 </span>
               </div>
 
@@ -1716,9 +1888,14 @@ export function TasksPanel({
                     className={bottom === 'run' ? 'bottom-tab active' : 'bottom-tab'}
                     onClick={() => setBottom(bottom === 'run' ? null : 'run')}
                   >
-                    {detail.task.kind === 'workflow' ? '运行实例' : '运行记录'}
+                    {detail.task.kind === 'workflow'
+                      ? '运行实例'
+                      : detail.task.kind === 'sync'
+                        ? '同步记录'
+                        : '运行记录'}
                     {(runResult ||
                       writeResult ||
+                      syncResult ||
                       (detail.task.kind === 'workflow' && (wfRuns?.length ?? 0) > 0)) && (
                       <span className="bottom-dot" aria-hidden="true" />
                     )}
@@ -1759,7 +1936,7 @@ export function TasksPanel({
                   >
                     任务信息
                   </button>
-                  {detail.task.kind === 'write' && (
+                  {(detail.task.kind === 'write' || detail.task.kind === 'sync') && (
                     <button
                       type="button"
                       role="tab"
@@ -1767,10 +1944,16 @@ export function TasksPanel({
                       className={bottom === 'audit' ? 'bottom-tab active' : 'bottom-tab'}
                       onClick={() => setBottom(bottom === 'audit' ? null : 'audit')}
                     >
-                      写入审计
-                      {audit && audit.length > 0 && (
-                        <span className="bottom-count mono">{audit.length}</span>
-                      )}
+                      {detail.task.kind === 'sync' ? '同步审计' : '写入审计'}
+                      {detail.task.kind === 'sync'
+                        ? syncEvents &&
+                          syncEvents.length > 0 && (
+                            <span className="bottom-count mono">{syncEvents.length}</span>
+                          )
+                        : audit &&
+                          audit.length > 0 && (
+                            <span className="bottom-count mono">{audit.length}</span>
+                          )}
                     </button>
                   )}
                   <span className="spacer" />
@@ -1937,6 +2120,81 @@ export function TasksPanel({
                               </div>
                             )}
                           </>
+                        ) : detail.task.kind === 'sync' ? (
+                          <>
+                            {!syncResult && !syncBusy && (
+                              <p className="meta bottom-empty">
+                                还没有预演记录。保存后点「预演同步」：服务端只读源表、
+                                统计行数与样本，不写目标库；确认后才执行搬运。
+                              </p>
+                            )}
+                            {syncBusy && (
+                              <p className="meta">正在预演（只读源表，不写目标库）…</p>
+                            )}
+                            {syncResult && syncResult.status === 'preview' && (
+                              <>
+                                <div className="bottom-run-head">
+                                  <span className="badge badge-write">预演通过</span>
+                                  <span className="meta mono">
+                                    {syncResult.source_table} → {syncResult.target_table}{' '}
+                                    · 将同步 {syncResult.rows ?? 0} 行 ·{' '}
+                                    {syncResult.mode === 'incremental'
+                                      ? '增量'
+                                      : '全量'}
+                                    {syncResult.mode === 'incremental' &&
+                                    syncResult.watermark_after
+                                      ? `（水位 ${syncResult.watermark_before || '空'} → ${syncResult.watermark_after}）`
+                                      : ''}
+                                  </span>
+                                  <span className="spacer" />
+                                  <button
+                                    className="btn btn-cancel btn-tiny"
+                                    disabled={syncCommitBusy}
+                                    onClick={() => void commitSync()}
+                                  >
+                                    {syncCommitBusy ? '提交中…' : '确认提交'}
+                                  </button>
+                                </div>
+                                <p className="meta bottom-history-hint">
+                                  {syncResult.target_exists
+                                    ? `目标表已有 ${syncResult.target_rows ?? 0} 行；全量模式会先清空再写入。`
+                                    : '目标表尚不存在，提交时按源表列自动建表。'}{' '}
+                                  凭据 5 分钟内有效，期间任务被修改并保存后需重新预演。
+                                </p>
+                                <div className="write-diff">
+                                  <div className="write-diff-col">
+                                    <div className="write-diff-title mono">
+                                      源表样本（最多 20 行）
+                                    </div>
+                                    <WriteSampleTable rows={syncResult.sample ?? []} />
+                                  </div>
+                                  <div className="write-diff-col">
+                                    <div className="write-diff-title mono">
+                                      目标库当前状态
+                                    </div>
+                                    <p className="meta">
+                                      {syncResult.source_id} ·{' '}
+                                      {syncResult.target_exists
+                                        ? `已有 ${syncResult.target_rows ?? 0} 行`
+                                        : '目标表不存在'}
+                                      {syncState?.watermark
+                                        ? ` · 上次水位 ${syncState.watermark}`
+                                        : ''}
+                                    </p>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                            {syncResult && syncResult.status !== 'preview' && (
+                              <div className="alert alert-bad">
+                                <strong>执行失败</strong>
+                                {syncResult.reason}
+                                {syncResult.rule && (
+                                  <span className="meta mono">规则：{syncResult.rule}</span>
+                                )}
+                              </div>
+                            )}
+                          </>
                         ) : (
                           <>
                             {!runResult && !runBusy && (
@@ -2066,6 +2324,7 @@ export function TasksPanel({
                                 | 'pyspark'
                                 | 'write'
                                 | 'workflow'
+                                | 'sync'
                               if (kind === detail.task.kind) return
                               void (async () => {
                                 setSaveBusy(true)
@@ -2088,6 +2347,7 @@ export function TasksPanel({
                             <option value="pyspark">PySpark</option>
                             <option value="write">写入（受控写）</option>
                             <option value="workflow">工作流（调度编排）</option>
+                            <option value="sync">数据同步（表级全量/增量）</option>
                           </select>
                         </label>
                         <label className="field span2">
@@ -2109,7 +2369,7 @@ export function TasksPanel({
                       </div>
                     )}
 
-                    {bottom === 'audit' && (
+                    {bottom === 'audit' && detail.task.kind !== 'sync' && (
                       <div className="bottom-audit">
                         <div className="meta bottom-history-hint">
                           预演 / 提交 / 被拦都会留审计；写入只作用于项目绑定的 SQLite 测试库。
@@ -2161,6 +2421,78 @@ export function TasksPanel({
                                       title={entry.error || entry.sql}
                                     >
                                       {entry.error || entry.sql}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {bottom === 'audit' && detail.task.kind === 'sync' && (
+                      <div className="bottom-audit">
+                        <div className="meta bottom-history-hint">
+                          预演 / 提交 / 失败都会留审计；同步只把源表数据写入项目绑定的 SQLite
+                          写库。
+                          <button
+                            className="linkbtn"
+                            disabled={syncInfoBusy}
+                            onClick={() => void loadSyncInfo(detail.task.task_id)}
+                          >
+                            {syncInfoBusy ? '刷新中…' : '刷新'}
+                          </button>
+                        </div>
+                        {syncInfoError && (
+                          <div className="alert alert-bad">{syncInfoError}</div>
+                        )}
+                        {syncInfoBusy && !syncEvents && (
+                          <p className="meta">正在载入同步记录…</p>
+                        )}
+                        {syncEvents && syncEvents.length === 0 && (
+                          <p className="meta bottom-empty">还没有同步记录。</p>
+                        )}
+                        {syncEvents && syncEvents.length > 0 && (
+                          <div className="write-diff-scroll">
+                            <table className="write-audit-table">
+                              <thead>
+                                <tr>
+                                  <th>时间</th>
+                                  <th>状态</th>
+                                  <th>模式</th>
+                                  <th>源表</th>
+                                  <th>目标表</th>
+                                  <th>行数</th>
+                                  <th>水位</th>
+                                  <th>任务 / 原因</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {syncEvents.map((entry) => (
+                                  <tr key={entry.event_id}>
+                                    <td className="mono">{entry.created_at}</td>
+                                    <td>
+                                      <span className={auditBadge(entry.status)}>
+                                        {auditLabel(entry.status)}
+                                      </span>
+                                    </td>
+                                    <td className="mono">
+                                      {entry.mode === 'incremental' ? '增量' : '全量'}
+                                    </td>
+                                    <td className="mono">{entry.source_table}</td>
+                                    <td className="mono">{entry.target_table}</td>
+                                    <td className="mono">{entry.rows}</td>
+                                    <td className="mono">
+                                      {entry.watermark_before || '—'} →{' '}
+                                      {entry.watermark_after || '—'}
+                                    </td>
+                                    <td
+                                      className="mono write-audit-sql"
+                                      title={entry.error || entry.task_name}
+                                    >
+                                      {entry.error || entry.task_name}{' '}
+                                      <span className="meta mono">v{entry.revision}</span>
                                     </td>
                                   </tr>
                                 ))}
@@ -2254,7 +2586,7 @@ export function TasksPanel({
                 value={ntKind}
                 onChange={(e) =>
                   setNtKind(
-                    e.target.value as 'sql' | 'pyspark' | 'write' | 'workflow',
+                    e.target.value as 'sql' | 'pyspark' | 'write' | 'workflow' | 'sync',
                   )
                 }
               >
@@ -2262,6 +2594,7 @@ export function TasksPanel({
                 <option value="pyspark">PySpark（可保存，执行器未接入）</option>
                 <option value="write">写入（受控写，先预演再提交）</option>
                 <option value="workflow">工作流（调度编排，先加步骤）</option>
+                <option value="sync">数据同步（表级全量/增量）</option>
               </select>
             </label>
             <label className="field span2">
@@ -2276,11 +2609,13 @@ export function TasksPanel({
                     ? '写入 SQL（单条 INSERT / UPDATE / DELETE，必须带 WHERE）'
                     : ntKind === 'workflow'
                       ? '工作流定义（可留空，创建后用步骤编辑器维护）'
-                      : 'SQL（只读）'}
+                      : ntKind === 'sync'
+                        ? '同步配置（可留空，创建后用表单维护；默认 {"mode": "full"}）'
+                        : 'SQL（只读）'}
               </span>
               <textarea
                 className="sql-editor mono"
-                rows={ntKind === 'workflow' ? 5 : 10}
+                rows={ntKind === 'workflow' ? 5 : ntKind === 'sync' ? 8 : 10}
                 value={ntSql}
                 spellCheck={false}
                 placeholder={
@@ -2290,7 +2625,9 @@ export function TasksPanel({
                       ? 'UPDATE probe_order SET status = \'paid\' WHERE order_id = 1'
                       : ntKind === 'workflow'
                         ? '留空即可（创建后默认 {"steps": []}）；也可以直接粘贴 {"steps": [...]} 结构'
-                        : 'SELECT ...'
+                        : ntKind === 'sync'
+                          ? '留空即可（创建后默认 {"mode": "full"}）；也可以粘贴 {"source_id":"src","table":"probe_item","mode":"full"}'
+                          : 'SELECT ...'
                 }
                 onChange={(e) => setNtSql(e.target.value)}
               />
@@ -2304,7 +2641,7 @@ export function TasksPanel({
               disabled={
                 ntBusy ||
                 !ntName.trim() ||
-                (ntKind !== 'workflow' && !ntSql.trim())
+                (ntKind !== 'workflow' && ntKind !== 'sync' && !ntSql.trim())
               }
               onClick={() => void submitNewTask()}
             >

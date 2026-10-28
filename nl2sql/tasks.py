@@ -43,11 +43,14 @@ __all__ = [
     "AI_COMMENT_PREFIX",
     "DEFAULT_TASK_FOLDERS",
     "MAX_SQL_CHARS",
+    "MAX_SYNC_ROWS",
     "MAX_WORKFLOW_STEPS",
+    "TASK_SYNC_MODES",
     "Task",
     "TaskRevision",
     "TaskStore",
     "default_task_store_path",
+    "parse_sync_config",
     "parse_workflow",
     "stamp_ai_comment",
     "topological_order",
@@ -55,6 +58,7 @@ __all__ = [
     "validate_task_content",
     "validate_task_kind",
     "validate_task_sql",
+    "validate_task_sync",
     "validate_task_workflow",
     "validate_task_write",
 ]
@@ -68,18 +72,26 @@ MAX_NOTE_CHARS = 500
 # 任务类型。SQL 走只读查询链路；PySpark 只保存代码，执行器尚未接入；
 # 写入任务走受控写链路（单表 + 带条件 + 影响行数上限 + 预演凭据），
 # 与只读问答链路完全分离；工作流任务只保存步骤 DAG，由调度器/手动触发，
-# 步骤本身仍然只能是只读 SQL 任务。
+# 步骤本身仍然只能是只读 SQL 任务；同步任务把「源数据源的一张表」搬到
+# 项目绑定的 SQLite 写库（目标端仍是受控写防线）。
 TASK_KIND_SQL = "sql"
 TASK_KIND_PYSPARK = "pyspark"
 TASK_KIND_WRITE = "write"
 TASK_KIND_WORKFLOW = "workflow"
+TASK_KIND_SYNC = "sync"
 TASK_KINDS = (TASK_KIND_SQL, TASK_KIND_PYSPARK, TASK_KIND_WRITE,
-              TASK_KIND_WORKFLOW)
+              TASK_KIND_WORKFLOW, TASK_KIND_SYNC)
 
 # 工作流（一期原生调度）：步骤上限刻意很小——本地单用户场景里，
 # 超过 20 步的「工作流」其实是没人读得懂的脚本，不如拆成多个工作流。
 MAX_WORKFLOW_STEPS = 20
 MAX_WORKFLOW_STEP_KEY = 40
+
+# 原生同步（一期）：源端 = 任意只读数据源的一张表；目标端 = 项目绑定的
+# SQLite 写库。单次行数硬上限（项目 data_write.max_affected 只会更小）。
+TASK_SYNC_MODES = ("full", "incremental")
+MAX_SYNC_ROWS = 1000
+_SYNC_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
 # 项目首次打开任务库时自动建的四层数仓目录（ODS → DWD → DWM → ADS）。
 DEFAULT_TASK_FOLDERS = ("ods", "dwd", "dwm", "ads")
@@ -218,6 +230,54 @@ CREATE INDEX IF NOT EXISTS idx_workflow_run
     ON workflow_run(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_run_step
     ON workflow_run_step(run_id);
+
+-- 原生同步（一期）：增量同步的水位线（每个同步任务一行）。
+-- 首次增量按全量处理（watermark 为空），之后只搬「水位之后」的行。
+CREATE TABLE IF NOT EXISTS sync_state (
+    task_id      TEXT PRIMARY KEY,
+    watermark    TEXT NOT NULL DEFAULT '',
+    rows         INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT NOT NULL
+);
+
+-- 同步预演凭据：预演时把「要搬多少行、水位从哪到哪」冻结下来，
+-- 5 分钟内凭此提交；提交前会重读源表核对行数与水位是否仍一致。
+CREATE TABLE IF NOT EXISTS sync_preview (
+    preview_id       TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL,
+    project_id       TEXT NOT NULL DEFAULT '',
+    revision         INTEGER NOT NULL DEFAULT 0,
+    mode             TEXT NOT NULL DEFAULT 'full',
+    source_id        TEXT NOT NULL DEFAULT '',
+    source_table     TEXT NOT NULL DEFAULT '',
+    target_table     TEXT NOT NULL DEFAULT '',
+    rows             INTEGER NOT NULL DEFAULT 0,
+    watermark_before TEXT NOT NULL DEFAULT '',
+    watermark_after  TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL,
+    expires_at       TEXT NOT NULL
+);
+
+-- 同步审计：预演、提交、失败都留痕（不存业务数据快照）。
+CREATE TABLE IF NOT EXISTS sync_event (
+    event_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id       TEXT NOT NULL DEFAULT '',
+    task_id          TEXT NOT NULL DEFAULT '',
+    task_name        TEXT NOT NULL DEFAULT '',
+    revision         INTEGER NOT NULL DEFAULT 0,
+    mode             TEXT NOT NULL DEFAULT '',
+    source_id        TEXT NOT NULL DEFAULT '',
+    source_table     TEXT NOT NULL DEFAULT '',
+    target_table     TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL DEFAULT '',
+    rows             INTEGER NOT NULL DEFAULT 0,
+    error            TEXT NOT NULL DEFAULT '',
+    watermark_before TEXT NOT NULL DEFAULT '',
+    watermark_after  TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_event ON sync_event(created_at);
 """
 
 
@@ -379,6 +439,77 @@ def validate_task_workflow(content: str) -> str:
     return (content or "").strip()
 
 
+def parse_sync_config(content: str, *, draft: bool = True) -> dict[str, Any]:
+    """解析同步任务正文，返回规范化配置。
+
+    正文是 JSON（不做拖拽画布，便于审阅与版本化）：
+
+        {
+          "source_id": "default",      # 从哪个数据源读
+          "table": "orders",           # 源表
+          "target_table": "orders",    # 目标表（缺省同名）
+          "mode": "full",              # full | incremental
+          "watermark": "id"            # incremental 必填：单调递增列
+        }
+
+    `draft=True` 允许字段留空（新建任务时的占位正文）；
+    预演/执行时用 `draft=False` 严格校验。
+    """
+    text = (content or "").strip()
+    if not text:
+        raise TaskError("同步任务定义不能为空")
+    if len(text) > MAX_SQL_CHARS:
+        raise TaskError(
+            f"同步任务定义太长（{len(text)} 字符，上限 {MAX_SQL_CHARS}）"
+        )
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise TaskError(f"同步任务定义不是合法 JSON：{exc.msg}（第 {exc.lineno} 行）") from exc
+    if not isinstance(data, dict):
+        raise TaskError("同步任务定义必须是 JSON 对象（包含 source_id / table 等字段）")
+
+    source_id = str(data.get("source_id") or "").strip()
+    table = str(data.get("table") or "").strip()
+    target_table = str(data.get("target_table") or "").strip()
+    mode = str(data.get("mode") or "full").strip().lower()
+    watermark = str(data.get("watermark") or "").strip()
+
+    if mode not in TASK_SYNC_MODES:
+        raise TaskError(
+            f"未知同步模式：{mode!r}（只支持 {' / '.join(TASK_SYNC_MODES)}）"
+        )
+    for label, value in (("源表", table), ("目标表", target_table),
+                         ("增量列", watermark)):
+        if value and not _SYNC_IDENT_RE.fullmatch(value):
+            raise TaskError(
+                f"{label}「{value}」不合法：只支持字母/数字/下划线，"
+                "以字母或下划线开头，最长 63 字符"
+            )
+    if not draft:
+        if not source_id:
+            raise TaskError("同步任务缺少源数据源（source_id）")
+        if not table:
+            raise TaskError("同步任务缺少源表（table）")
+        if mode == "incremental" and not watermark:
+            raise TaskError(
+                "增量同步必须指定递增列（watermark，例如 id 或 updated_at）"
+            )
+    return {
+        "source_id": source_id,
+        "table": table,
+        "target_table": target_table or table,
+        "mode": mode,
+        "watermark": watermark,
+    }
+
+
+def validate_task_sync(content: str) -> str:
+    """校验同步任务正文（允许草稿：字段可留空，预演时再严格要求）。"""
+    parse_sync_config(content, draft=True)
+    return (content or "").strip()
+
+
 def validate_task_kind(kind: str | None) -> str:
     """校验任务类型。默认 SQL；PySpark 仅保存代码与版本，执行器未接入。"""
     text = (kind or TASK_KIND_SQL).strip().lower()
@@ -395,7 +526,8 @@ def validate_task_content(kind: str, content: str) -> str:
     SQL 任务必须单条只读查询（会被真正执行）；
     PySpark 任务只是保存代码与版本，执行器未接入，因此不做只读语法限制；
     写入任务走受控写守门（单表 + 带条件），执行时还要再过影响行数上限；
-    工作流任务正文是步骤 DAG 的 JSON，步骤本身在触发时再校验。
+    工作流任务正文是步骤 DAG 的 JSON，步骤本身在触发时再校验；
+    同步任务正文是 JSON 配置，保存时允许草稿，预演/执行时严格校验。
     """
     if kind == TASK_KIND_PYSPARK:
         text = (content or "").strip()
@@ -410,6 +542,8 @@ def validate_task_content(kind: str, content: str) -> str:
         return validate_task_write(content)
     if kind == TASK_KIND_WORKFLOW:
         return validate_task_workflow(content)
+    if kind == TASK_KIND_SYNC:
+        return validate_task_sync(content)
     return validate_task_sql(content)
 
 
@@ -949,6 +1083,10 @@ class TaskStore:
                 "DELETE FROM workflow_run WHERE task_id = ?", (task_id,))
             conn.execute(
                 "DELETE FROM workflow_schedule WHERE task_id = ?", (task_id,))
+            # 同步任务：水位线、预演凭据、审计一并清理（避免孤儿数据）。
+            conn.execute("DELETE FROM sync_state WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM sync_preview WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM sync_event WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM task_revision WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM task WHERE task_id = ?", (task_id,))
         return True
@@ -1259,6 +1397,131 @@ class TaskStore:
         run["succeeded_steps"] = summary.get("success", 0)
         run["failed_steps"] = summary.get("failed", 0)
         return run
+
+    # ------------------------------------------------------------ 原生同步
+    def sync_state(self, task_id: str) -> dict[str, Any] | None:
+        """增量同步的水位线（首次增量按全量处理，返回 None）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT task_id, watermark, rows, updated_at FROM sync_state "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_sync_state(self, task_id: str, *, watermark: str, rows: int) -> None:
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO sync_state (task_id, watermark, rows, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET "
+                "watermark = excluded.watermark, rows = excluded.rows, "
+                "updated_at = excluded.updated_at",
+                (task_id, (watermark or "")[:500], int(rows), now),
+            )
+
+    def save_sync_preview(
+        self,
+        task: Task,
+        *,
+        mode: str,
+        source_id: str,
+        source_table: str,
+        target_table: str,
+        rows: int,
+        watermark_before: str,
+        watermark_after: str,
+        ttl_s: int = 300,
+    ) -> dict[str, Any]:
+        """保存一次预演凭据（5 分钟有效，一次性）。"""
+        now = datetime.now()
+        created = now.strftime(_TS_FORMAT)
+        expires = (now + timedelta(seconds=ttl_s)).strftime(_TS_FORMAT)
+        preview_id = "sp-" + uuid.uuid4().hex[:12]
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM sync_preview WHERE expires_at <= ?", (created,))
+            conn.execute(
+                "INSERT INTO sync_preview (preview_id, task_id, project_id,"
+                " revision, mode, source_id, source_table, target_table, rows,"
+                " watermark_before, watermark_after, created_at, expires_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (preview_id, task.task_id, task.project_id, int(task.revision),
+                 mode, source_id, source_table, target_table, int(rows),
+                 (watermark_before or "")[:500], (watermark_after or "")[:500],
+                 created, expires),
+            )
+        return {
+            "preview_id": preview_id,
+            "expires_at": expires,
+            "rows": int(rows),
+            "watermark_before": watermark_before,
+            "watermark_after": watermark_after,
+        }
+
+    def get_sync_preview(self, preview_id: str) -> dict[str, Any] | None:
+        now = self._now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sync_preview WHERE preview_id = ?",
+                (preview_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if str(row["expires_at"]) <= now:
+                conn.execute(
+                    "DELETE FROM sync_preview WHERE preview_id = ?",
+                    (preview_id,),
+                )
+                return None
+        return dict(row)
+
+    def delete_sync_preview(self, preview_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM sync_preview WHERE preview_id = ?", (preview_id,))
+
+    def record_sync_event(
+        self,
+        task: Task,
+        *,
+        status: str,
+        mode: str = "",
+        source_id: str = "",
+        source_table: str = "",
+        target_table: str = "",
+        rows: int = 0,
+        error: str = "",
+        watermark_before: str = "",
+        watermark_after: str = "",
+    ) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO sync_event (project_id, task_id, task_name,"
+                " revision, mode, source_id, source_table, target_table,"
+                " status, rows, error, watermark_before, watermark_after,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (task.project_id, task.task_id, task.name[:80],
+                 int(task.revision), mode, source_id, source_table,
+                 target_table, status, int(rows), (error or "")[:500],
+                 (watermark_before or "")[:500], (watermark_after or "")[:500],
+                 self._now()),
+            )
+            return int(cur.lastrowid)
+
+    def list_sync_events(
+        self, *, task_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM sync_event"
+        params: list[Any] = []
+        if task_id:
+            sql += " WHERE task_id = ?"
+            params.append(task_id)
+        sql += " ORDER BY event_id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
 
     def move(self, task_id: str, folder: str) -> Task:
         """把任务移动到另一个文件夹（元数据操作，不生成新版本）。"""

@@ -353,7 +353,7 @@ export interface TaskSummary {
   description: string
   /** 所属文件夹路径（如 ods/原始层），空串 = 根目录 */
   folder: string
-  /** "sql" | "pyspark" | "write" | "workflow"；PySpark 任务只能保存/版本，暂不支持运行 */
+  /** "sql" | "pyspark" | "write" | "workflow" | "sync"；PySpark 任务只能保存/版本，暂不支持运行 */
   kind: string
   status: string
   /** 前若干字符，列表里做一行预览 */
@@ -609,6 +609,94 @@ export interface WorkflowRunnerResponse {
   run_id: string
   task_id: string
   task: TaskSummary
+}
+
+// ---------------------------------------------------------------- 原生同步（P1）
+/** 同步任务正文：把源库的一张表搬到项目写目标（SQLite） */
+export interface SyncConfig {
+  /** 读源（项目里绑定的数据源，只读连接） */
+  source_id: string
+  /** 源表名 */
+  table: string
+  /** 目标表名；缺省与源表同名 */
+  target_table?: string
+  /** full = 全量覆盖；incremental = 按水位列只搬新行 */
+  mode: 'full' | 'incremental'
+  /** 增量水位列（如 id / updated_at），incremental 必填 */
+  watermark?: string
+}
+
+/** GET .../sync/info 的累计状态 */
+export interface SyncState {
+  task_id: string
+  watermark: string
+  rows: number
+  updated_at: string
+}
+
+/** POST .../sync/preview：预演结果（不写目标库） */
+export interface SyncPreviewResponse {
+  /** preview | failed */
+  status: string
+  reason?: string
+  rule?: string
+  preview_id?: string
+  expires_at?: string
+  rows?: number
+  columns?: string[]
+  sample?: Record<string, unknown>[]
+  source_id?: string
+  source_table?: string
+  target_table?: string
+  target_exists?: boolean
+  target_rows?: number
+  watermark_before?: string
+  watermark_after?: string
+  mode?: string
+  audit_id?: number
+  task?: TaskSummary
+  max_affected?: number
+}
+
+/** POST .../sync/commit */
+export interface SyncCommitResponse {
+  /** committed | failed */
+  status: string
+  reason?: string
+  rule?: string
+  rows?: number
+  target_rows?: number
+  target_table?: string
+  created_table?: boolean
+  watermark_after?: string
+  audit_id?: number
+  task?: TaskSummary
+}
+
+/** 一条同步审计记录 */
+export interface SyncEventEntry {
+  event_id: number
+  project_id: string
+  task_id: string
+  task_name: string
+  revision: number
+  mode: string
+  source_id: string
+  source_table: string
+  target_table: string
+  /** preview | committed | failed */
+  status: string
+  rows: number
+  error: string
+  watermark_before: string
+  watermark_after: string
+  created_at: string
+}
+
+export interface SyncInfoResponse {
+  task_id: string
+  state: SyncState
+  events: SyncEventEntry[]
 }
 
 // ---------------------------------------------------------------- 插件与工具管理

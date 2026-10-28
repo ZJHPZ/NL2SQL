@@ -20,15 +20,19 @@ from nl2sql.errors import NL2SQLError, TaskError
 from nl2sql.guard.write import WriteGuard
 from nl2sql.tasks import (
     DEFAULT_TASK_FOLDERS,
+    MAX_SYNC_ROWS,
     TASK_KIND_SQL,
+    TASK_KIND_SYNC,
     TASK_KIND_WORKFLOW,
     TASK_KIND_WRITE,
     TaskStore,
+    parse_sync_config,
 )
 
-from .. import workflow_runner, write_runner
+from .. import sync_runner, workflow_runner, write_runner
 from ..projects import DEFAULT_PROJECT_ID, ProjectHub
 from ..schemas import (
+    SyncCommitRequest,
     TaskCreateRequest,
     TaskFolderCreateRequest,
     TaskFolderRenameRequest,
@@ -649,4 +653,179 @@ def list_write_audit(project_id: str, request: Request,
     return {
         "project_id": project_id,
         "audit": store.list_write_audit(limit=_clamp_limit(limit, 50, 200)),
+    }
+
+
+# ============================================================== 原生同步
+def _sync_or_400(store: TaskStore, task_id: str):
+    task = _task_or_404(store, task_id)
+    if task.kind != TASK_KIND_SYNC:
+        raise HTTPException(status_code=400,
+                            detail="只有「数据同步」任务可以做同步预演与提交")
+    return task
+
+
+def _sync_config(task: Any) -> dict[str, Any]:
+    try:
+        return parse_sync_config(task.sql, draft=False)
+    except TaskError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"同步任务配置不完整：{exc}",
+        ) from exc
+
+
+def _sync_audit(store: TaskStore, task: Any, config: dict[str, Any],
+                *, status: str, rows: int = 0, error: str = "",
+                watermark_before: str = "", watermark_after: str = "") -> int:
+    return store.record_sync_event(
+        task, status=status, mode=config.get("mode", ""),
+        source_id=config.get("source_id", ""),
+        source_table=config.get("table", ""),
+        target_table=config.get("target_table", ""),
+        rows=rows, error=error, watermark_before=watermark_before,
+        watermark_after=watermark_after,
+    )
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/sync/preview")
+def sync_preview(project_id: str, task_id: str,
+                 request: Request) -> dict[str, Any]:
+    """预演同步：只读源表、读取目标表现状，不写任何数据。"""
+    hub = _hub(request)
+    store, engine = _store_for(hub, project_id)
+    task = _sync_or_400(store, task_id)
+    config = _sync_config(task)
+    db_path, settings = _write_target(hub, project_id, "", store)
+    max_affected = min(int(settings.get("max_affected") or 100), MAX_SYNC_ROWS)
+    state = store.sync_state(task_id)
+    try:
+        result = sync_runner.preview(
+            db_path=db_path, engine=engine, config=config,
+            state=state, max_affected=max_affected,
+        )
+    except sync_runner.SyncError as exc:
+        audit_id = _sync_audit(store, task, config, status="failed",
+                               error=str(exc))
+        return {
+            "status": "failed", "reason": str(exc), "rule": exc.rule,
+            "audit_id": audit_id, "task": _summary(task),
+            "max_affected": max_affected,
+        }
+    saved = store.save_sync_preview(
+        task, mode=config["mode"], source_id=config["source_id"],
+        source_table=config["table"], target_table=config["target_table"],
+        rows=int(result["rows"]),
+        watermark_before=result["watermark_before"],
+        watermark_after=result["watermark_after"],
+    )
+    audit_id = _sync_audit(
+        store, task, config, status="preview", rows=int(result["rows"]),
+        watermark_before=result["watermark_before"],
+        watermark_after=result["watermark_after"],
+    )
+    return {
+        "status": "preview",
+        "preview_id": saved["preview_id"],
+        "expires_at": saved["expires_at"],
+        "rows": result["rows"],
+        "columns": result["columns"],
+        "sample": result["sample"],
+        "source_id": config["source_id"],
+        "source_table": config["table"],
+        "target_table": result["target_table"],
+        "target_exists": result["target_exists"],
+        "target_rows": result["target_rows"],
+        "watermark_before": result["watermark_before"],
+        "watermark_after": result["watermark_after"],
+        "mode": result["mode"],
+        "audit_id": audit_id,
+        "task": _summary(task),
+        "max_affected": max_affected,
+    }
+
+
+@router.post("/projects/{project_id}/tasks/{task_id}/sync/commit")
+def sync_commit(project_id: str, task_id: str, req: SyncCommitRequest,
+                request: Request) -> dict[str, Any]:
+    """凭预演凭据提交：重读源表核对后，在目标 SQLite 单事务里写入。"""
+    if not req.confirm:
+        raise HTTPException(status_code=400,
+                            detail="提交前必须显式确认（confirm=true）")
+    hub = _hub(request)
+    store, engine = _store_for(hub, project_id)
+    task = _sync_or_400(store, task_id)
+    preview = store.get_sync_preview(req.preview_id)
+    if preview is None:
+        raise HTTPException(
+            status_code=400,
+            detail="同步预演凭据不存在或已过期（5 分钟有效）；请重新预演",
+        )
+    if preview["project_id"] != project_id or preview["task_id"] != task_id:
+        raise HTTPException(status_code=400,
+                            detail="预演凭据与当前项目/任务不匹配")
+    if int(task.revision) != int(preview["revision"]):
+        store.delete_sync_preview(req.preview_id)
+        raise HTTPException(
+            status_code=409,
+            detail="任务在预演后又被修改过；请重新预演",
+        )
+    config = _sync_config(task)
+    try:
+        db_path, settings = _write_target(hub, project_id, "", store)
+    except HTTPException:
+        store.delete_sync_preview(req.preview_id)
+        raise
+    max_affected = min(int(settings.get("max_affected") or 100), MAX_SYNC_ROWS)
+    state = store.sync_state(task_id)
+    try:
+        done = sync_runner.commit(
+            db_path=db_path, engine=engine, config=config, state=state,
+            max_affected=max_affected,
+            expected_rows=int(preview["rows"]),
+            expected_watermark_after=str(preview["watermark_after"] or ""),
+        )
+    except sync_runner.SyncError as exc:
+        store.delete_sync_preview(req.preview_id)
+        audit_id = _sync_audit(store, task, config, status="failed",
+                               error=str(exc))
+        return {
+            "status": "failed", "reason": str(exc), "rule": exc.rule,
+            "audit_id": audit_id, "task": _summary(task),
+        }
+    store.delete_sync_preview(req.preview_id)
+    store.save_sync_state(
+        task_id, watermark=str(done["watermark_after"] or ""),
+        rows=int(done["rows"]))
+    audit_id = _sync_audit(
+        store, task, config, status="committed", rows=int(done["rows"]),
+        watermark_before=str(preview["watermark_before"] or ""),
+        watermark_after=str(done["watermark_after"] or ""),
+    )
+    return {
+        "status": "committed",
+        "rows": done["rows"],
+        "target_rows": done["target_rows"],
+        "target_table": done["target_table"],
+        "created_table": done["created_table"],
+        "watermark_after": done["watermark_after"],
+        "audit_id": audit_id,
+        "task": _summary(store.get(task_id) or task),
+    }
+
+
+@router.get("/projects/{project_id}/tasks/{task_id}/sync/info")
+def sync_info(project_id: str, task_id: str, request: Request,
+              limit: int = 50) -> dict[str, Any]:
+    hub = _hub(request)
+    store, _engine = _store_for(hub, project_id)
+    _sync_or_400(store, task_id)
+    state = store.sync_state(task_id) or {
+        "task_id": task_id, "watermark": "", "rows": 0, "updated_at": "",
+    }
+    return {
+        "task_id": task_id,
+        "state": state,
+        "events": store.list_sync_events(
+            task_id=task_id, limit=_clamp_limit(limit, 50, 200)),
     }

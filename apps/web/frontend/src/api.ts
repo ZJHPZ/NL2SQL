@@ -24,6 +24,9 @@ import type {
   SourceTablesResult,
   SourceTestResult,
   StreamEvent,
+  SyncCommitResponse,
+  SyncInfoResponse,
+  SyncPreviewResponse,
   TableInfo,
   TaskCreateResult,
   TaskDetail,
@@ -400,7 +403,7 @@ export const api = {
       sql: string
       description?: string
       folder?: string
-      kind?: 'sql' | 'pyspark' | 'write' | 'workflow'
+      kind?: 'sql' | 'pyspark' | 'write' | 'workflow' | 'sync'
     },
   ) =>
     request<TaskCreateResult>(
@@ -423,7 +426,7 @@ export const api = {
       sql?: string
       description?: string
       folder?: string
-      kind?: 'sql' | 'pyspark' | 'write' | 'workflow'
+      kind?: 'sql' | 'pyspark' | 'write' | 'workflow' | 'sync'
       note?: string
     },
   ) =>
@@ -548,6 +551,32 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
         `${encodeURIComponent(taskId)}/schedule`,
       { method: 'PUT', body: JSON.stringify(payload) },
+    ),
+
+  // ------------------------------------------------------------ 原生同步（P1）
+  /** 预演一次同步：事务里读源表算行数/样本，不写目标库 */
+  syncPreview: (projectId: string, taskId: string) =>
+    request<SyncPreviewResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/sync/preview`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  /** 确认执行：按预演凭据重读源表，行数/水位一致才写入目标库 */
+  syncCommit: (projectId: string, taskId: string, previewId: string) =>
+    request<SyncCommitResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/sync/commit`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ preview_id: previewId, confirm: true }),
+      },
+    ),
+
+  syncInfo: (projectId: string, taskId: string) =>
+    request<SyncInfoResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/` +
+        `${encodeURIComponent(taskId)}/sync/info`,
     ),
 
   // ------------------------------------------------------------ 任务文件夹

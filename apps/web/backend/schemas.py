@@ -283,10 +283,11 @@ class TaskCreateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     source_id: str | None = None
     folder: str = Field(default="", max_length=200, description="任务所在文件夹路径")
-    kind: Literal["sql", "pyspark", "write", "workflow"] = Field(
+    kind: Literal["sql", "pyspark", "write", "workflow", "sync"] = Field(
         default="sql",
         description=("任务类型：sql 只读可运行；pyspark 暂只保存代码；"
-                     "write 受控写；workflow 工作流步骤 DAG"),
+                     "write 受控写；workflow 工作流步骤 DAG；"
+                     "sync 表级全量/增量同步"),
     )
 
     _v_name = field_validator("name")(_must_not_be_blank)
@@ -301,7 +302,7 @@ class TaskUpdateRequest(BaseModel):
     enabled: bool | None = None
     source_id: str | None = None
     folder: str | None = Field(default=None, max_length=200)
-    kind: Literal["sql", "pyspark", "write", "workflow"] | None = None
+    kind: Literal["sql", "pyspark", "write", "workflow", "sync"] | None = None
     note: str = Field(default="", max_length=500)
 
 
@@ -348,4 +349,12 @@ class WriteCommitRequest(BaseModel):
     """凭预演凭据提交。must confirm=True，避免误触。"""
 
     dry_run_id: str = Field(..., min_length=1, max_length=64)
+    confirm: bool = Field(default=False, description="必须显式确认才提交")
+
+
+# --------------------------------------------------------------- 原生同步（P1）
+class SyncCommitRequest(BaseModel):
+    """凭同步预演凭据提交；必须显式确认。"""
+
+    preview_id: str = Field(..., min_length=1, max_length=64)
     confirm: bool = Field(default=False, description="必须显式确认才提交")

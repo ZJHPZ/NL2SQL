@@ -267,3 +267,40 @@ SQL 任务（write / PySpark / 另一个工作流都不能进步骤）。
 **验证**：`tests/test_workflow.py`（定义校验、手动/重跑、调度、去重、假时钟
 tick 触发）；`_tmp/e2e/workflow_probe.mjs` 覆盖编辑器/依赖切换/保存/cron/手动
 运行/实例步骤明细，axe 三态 0 违规；全量 E2E 与既有任务流程保持 0 冲突。
+
+## 原生同步（P1，2026-10-28）
+
+目标：在本地单用户工作台里落地「把 A 库一张表搬到 B 库」的最小闭环，复用只读适配器与
+受控写防线，不做自由 SQL 控制台。
+
+**模型**：任务类型再加一种「数据同步」（`kind=sync`），正文是 JSON 搬运配置：
+`{source_id, table, target_table?, mode: "full"|"incremental", watermark?}`。配置只描述
+表与模式，不存 SQL；`target_table` 缺省与 `table` 同名；增量模式必须有水位列。
+
+**存储**（项目 tasks.db）：
+- `sync_state(task_id, watermark, rows, updated_at)`：上次提交的水位与行数；
+- `sync_preview(...)`：5 分钟一次性预演凭据（含 revision），提交时校验任务未被改动；
+- `sync_event(...)`：预演 / 提交 / 失败审计，含 mode、源表、目标表、行数、水位前后、错误。
+
+**流程**：
+1. 预演：用只读适配器读源表（`SELECT *`；增量加 `WHERE wm > 上次水位 ORDER BY wm`），
+   统计行数与样本（最多 20 行），判断目标表是否存在、目标库当前行数，不写目标库；
+   行数超过项目 `data_write.max_affected` 即拒绝（`affected_limit`）。
+2. 确认提交：重新读源表核对行数/水位未变（`source_changed`），`BEGIN IMMEDIATE`
+   事务内按源列类型自动建表（`INTEGER/REAL/TEXT`）、全量先清空目标表、批量写入，
+   超上限回滚；成功后保存水位与行数并写审计。
+3. 目标库固定为项目「受控写」绑定的 SQLite 数据源（写权限默认关闭，需在项目详情
+   输入项目名开启）；读取可以是 SQLite / MySQL / PostgreSQL，读取永远只读。
+
+**界面**：同步任务的编辑器不是 SQL textarea，而是 `SyncEditor` 表单（源数据源 /
+源表 / 目标表 / 模式 / 水位列 + 写目标提示与「查看配置 JSON」）；编辑器条按钮为
+「预演同步」；底部面板「同步记录」显示预演结果（行数、模式、水位、源表样本、目标库
+现状）与「确认提交」，另有「同步审计」表；概览统计变为 7 格。
+
+**边界**：只做表级全量 / 增量搬运；目标只能是 SQLite 写目标；不做字段映射、Upsert、
+DDL 变更同步与多表事务；同步不会改变只读查询防线，问答链路永远只读。
+
+**验证**：`tests/test_sync.py` 覆盖配置校验、全量、增量水位、防线（未开写 / 超上限 /
+预演后改任务 409 / 目标源不存在）与审计；`_tmp/e2e/sync_probe.mjs` 覆盖树标识、表单、
+预演、确认提交、审计与 axe 三态（sync_editor / sync_preview / sync_audit 均 0 违规）；
+全量浏览器回归七探针保持一致。
